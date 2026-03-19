@@ -1,0 +1,60 @@
+[
+  {
+    "id": "sighting-1773951531762",
+    "lat": 63.43605200718778,
+    "lon": 10.420360565185549,
+    "route": "",
+    "note": "",
+    "reporter": "Jens",
+    "created_at": "2026-03-19T20:18:51.762264+00:00",
+    "stop_id": "NSR:Quay:103007",
+    "stop_name": "Buran",
+    "distance_to_stop_m": 221,
+    "liked_by": []
+  },
+  {
+    "id": "sighting-1773949691501",
+    "lat": 63.43669491811533,
+    "lon": 10.430703163146974,
+    "route": "02",
+    "note": "sivil",
+    "reporter": "Jens",
+    "created_at": "2026-03-19T19:48:11.501475+00:00",
+    "stop_id": "NSR:Quay:74588",
+    "stop_name": "Anders Buens gate",
+    "distance_to_stop_m": 197,
+    "liked_by": [
+      "cGnfZG_Ye9_j4meZUdLHzAcb"
+    ]
+  },
+  {
+    "id": "sighting-1773949645311",
+    "lat": 63.43621513520713,
+    "lon": 10.423665046691896,
+    "route": "02",
+    "note": "sivil",
+    "reporter": "Jens",
+    "created_at": "2026-03-19T19:47:25.311709+00:00",
+    "stop_id": "NSR:Quay:103007",
+    "stop_name": "Buran",
+    "distance_to_stop_m": 55,
+    "liked_by": [
+      "cGnfZG_Ye9_j4meZUdLHzAcb"
+    ]
+  },
+  {
+    "id": "sighting-1773948930523",
+    "lat": 59.943749240537386,
+    "lon": 10.51219940185547,
+    "route": "210",
+    "note": "10 stykk",
+    "reporter": "Anonym",
+    "created_at": "2026-03-19T19:35:30.523206+00:00",
+    "stop_id": "NSR:Quay:7792",
+    "stop_name": "Helsetveien",
+    "distance_to_stop_m": 79,
+    "liked_by": [
+      "cGnfZG_Ye9_j4meZUdLHzAcb"
+    ]
+  }
+]

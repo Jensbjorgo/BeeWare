@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BeeWare</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="panel">
+        <div class="brand">
+          <p class="eyebrow">BeeWare</p>
+          <h1>BeeWare for biene</h1>
+          <p class="lead">
+            Kart for å varsle om kontrollører. Meld inn biene og hjelp andre å være BeeWare.
+          </p>
+        </div>
+
+        <section class="card">
+          <div class="section-head">
+            <h2>Ny observasjon</h2>
+            <button id="locateBtn" class="ghost">Bruk min posisjon</button>
+          </div>
+
+          <form id="reportForm">
+            <label>
+              Holdeplass
+              <input id="stopInput" name="stop_name" type="text" placeholder="Søk holdeplass eller trykk i kartet" list="stopOptions" autocomplete="off" />
+              <datalist id="stopOptions"></datalist>
+            </label>
+
+            <label>
+              Busslinje
+              <input id="routeInput" name="route" type="text" placeholder="For eksempel 100 eller M1" list="routeOptions" autocomplete="off" />
+              <datalist id="routeOptions"></datalist>
+            </label>
+
+            <label>
+              Notat
+              <textarea id="noteInput" name="note" rows="3" maxlength="160" placeholder="For eksempel påstigning foran, sivil, to kontrollører"></textarea>
+            </label>
+
+            <div class="selection">
+              <div>
+                <p class="meta-label">Rapportposisjon</p>
+                <p id="selectedLocation" class="meta-value">Ingen posisjon valgt ennå.</p>
+              </div>
+              <div>
+                <p class="meta-label">Nærmeste stopp</p>
+                <p id="nearestStop" class="meta-value">Ikke hentet.</p>
+              </div>
+            </div>
+
+            <button type="submit" class="primary">Publiser observasjon</button>
+            <p id="formStatus" class="status"></p>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h2>Aktive observasjoner</h2>
+            <p id="ttlLabel" class="tiny"></p>
+          </div>
+          <div id="feed" class="feed"></div>
+        </section>
+      </aside>
+
+      <main class="map-wrap">
+        <section class="auth-popover card" id="authPopover">
+          <div class="section-head compact">
+            <div>
+              <h2>Bee ID</h2>
+              <p id="authState" class="tiny">Valgfritt</p>
+            </div>
+            <button id="authToggle" class="ghost auth-toggle" type="button">Profil</button>
+          </div>
+
+          <div id="authContent" class="hidden">
+            <div id="authForms">
+              <form id="loginForm" class="auth-form">
+                <label>
+                  Brukernavn
+                  <input id="loginUsername" type="text" placeholder="brukernavn" autocomplete="username" />
+                </label>
+                <label>
+                  Passord
+                  <input id="loginPassword" type="password" placeholder="passord" autocomplete="current-password" />
+                </label>
+                <button type="submit" class="primary">Logg inn</button>
+              </form>
+
+              <form id="registerForm" class="auth-form">
+                <label>
+                  Nytt brukernavn
+                  <input id="registerUsername" type="text" placeholder="ny bruker" autocomplete="username" />
+                </label>
+                <label>
+                  Nytt passord
+                  <input id="registerPassword" type="password" placeholder="minst 6 tegn" autocomplete="new-password" />
+                </label>
+                <button type="submit" class="ghost strong">Lag bruker</button>
+              </form>
+            </div>
+
+            <div id="userPanel" class="user-panel hidden">
+              <p class="meta-value">Innlogget som <strong id="currentUsername"></strong></p>
+              <div class="user-stats">
+                <span id="userLevel" class="pill">Level 1</span>
+                <span id="userXp" class="tiny">0 XP</span>
+              </div>
+              <button id="logoutBtn" class="ghost" type="button">Logg ut</button>
+            </div>
+
+            <p id="authStatus" class="status"></p>
+          </div>
+        </section>
+
+        <div id="map"></div>
+      </main>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
