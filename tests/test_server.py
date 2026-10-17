@@ -94,15 +94,18 @@ class RegressionTests(unittest.TestCase):
 def report(i):
     server.sighting_store.add({"id": str(i), "lat": 58, "lon": 8, "reporter": "Anonym", "owner": None,
                                "created_at": server.utc_now().isoformat(), "liked_by": []})
+registered = []
 def register(i):
     try:
         server.auth_store.create_user("same", f"password-{i}")
+        registered.append(i)
     except ValueError:
         pass
 threads = [threading.Thread(target=f, args=(i,)) for i in range(30) for f in (report, register)]
 [t.start() for t in threads]
 [t.join() for t in threads]
 assert len(server.sighting_store.list_recent()) == 30
+assert len(registered) == 1, registered
 assert sum(bool(server.auth_store.authenticate("same", f"password-{i}")) for i in range(30)) == 1
 """)
 
@@ -111,7 +114,7 @@ assert sum(bool(server.auth_store.authenticate("same", f"password-{i}")) for i i
 server.RATE_LIMITS["sighting"] = (100, 600)
 assert request("POST", "/api/sightings", {"lat": 58.1, "lon": 8, "route": "x" * 500})[0] == 201
 assert request("POST", "/api/sightings", '{"lat": 58, "lon": 8, "note": "\\\\ud800"}')[0] == 400
-for lat in (91, True, "nan", None):
+for lat in (91, True, "nan", None, 10 ** 309):
     assert request("POST", "/api/sightings", {"lat": lat, "lon": 8})[0] == 400, lat
 assert request("GET", "/api/stops/nearby?lat=nan&lon=8")[0] == 400
 assert request("POST", "/api/sightings", "{}", {"Content-Length": "99999"})[0] == 413
@@ -128,6 +131,9 @@ statuses = [request("POST", "/api/sightings", {"lat": 58, "lon": 8})[0] for _ in
 assert statuses == [201, 201, 201, 429], statuses
 logins = [request("POST", "/api/auth/login", {"username": "x", "password": "y"})[0] for _ in range(11)]
 assert logins[-2:] == [401, 429], logins
+# Behind the reverse proxy each client is counted by its own forwarded address.
+other = {"X-Forwarded-For": "203.0.113.9"}
+assert request("POST", "/api/sightings", {"lat": 58, "lon": 8}, other)[0] == 201
 """)
 
     def test_sessions_are_cleaned_and_secure_behind_https(self):

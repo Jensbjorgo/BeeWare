@@ -87,7 +87,10 @@ def clean_text(value: Any, limit: int) -> str:
 def parse_coordinate(value: Any, limit: float) -> float:
     if isinstance(value, bool):
         raise ValueError("not a number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:  # A huge JSON integer is not a ValueError.
+        raise ValueError("out of range") from exc
     if not math.isfinite(number) or abs(number) > limit:
         raise ValueError("out of range")
     return number
@@ -367,8 +370,7 @@ class AuthStore:
 transit_data = TransitData(DATA_DIR)
 sighting_store = SightingStore(SIGHTINGS_FILE)
 auth_store = AuthStore(USERS_FILE, SESSIONS_FILE)
-# ponytail: in-memory and per IP; resets on restart, and behind a proxy every
-# client shares the proxy's IP, so read X-Forwarded-For there.
+# ponytail: in-memory and per client IP; resets on restart.
 recent_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
@@ -578,7 +580,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         limit, window = RATE_LIMITS[action]
         now = time.monotonic()
         with STORE_LOCK:
-            hits = recent_requests[(action, self.client_address[0])]
+            hits = recent_requests[(action, self.client_ip())]
             while hits and hits[0] <= now - window:
                 hits.popleft()
             if len(hits) < limit:
@@ -608,6 +610,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "JSON body must be an object"}, status=HTTPStatus.BAD_REQUEST)
             return None
         return data
+
+    def client_ip(self) -> str:
+        # The server only listens on 127.0.0.1, so outside clients come through a reverse
+        # proxy, and the last X-Forwarded-For entry is the address that proxy saw.
+        forwarded = self.headers.get("X-Forwarded-For")
+        return forwarded.split(",")[-1].strip() if forwarded else self.client_address[0]
 
     def current_user(self) -> dict[str, str] | None:
         return auth_store.get_session_user(self.cookie_value(SESSION_COOKIE))
