@@ -7,7 +7,7 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Viser et kart med nylige observasjoner.
 - Lar brukeren trykke i kartet eller bruke egen posisjon for å registrere en observasjon.
 - Viser egen posisjon som egen blå markør i kartet.
-- Henter nærmeste holdeplass fra GTFS-dataene i `data/stops.txt`.
+- Henter nærmeste holdeplass innen 2 km fra GTFS-dataene i `data/stops.txt`.
 - Lar brukeren knytte observasjonen til busslinje fra `data/routes.txt`.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
 - Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
@@ -41,7 +41,7 @@ XP blir værende når observasjonen utløper.
 - Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
 - Forespørsler kan være på maks 4 KB, og POST fra andre nettsteder avvises.
 - Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`, får cookiene `Secure`.
-  Grensene gjelder per IP, så bak en proxy deler alle proxyens IP.
+  Bak en proxy telles hver klient etter siste adresse i `X-Forwarded-For`.
 
 ## Teknisk
 
