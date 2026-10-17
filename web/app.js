@@ -368,10 +368,16 @@ feed.addEventListener("click", async (event) => {
   }
 });
 
-map.on("click", async (event) => {
-  updateSelection(event.latlng.lat, event.latlng.lng);
-  await loadNearbyStop(event.latlng.lat, event.latlng.lng);
+// A double-click zooms, so wait briefly to keep its two clicks from moving the report position.
+let clickTimer;
+map.on("click", (event) => {
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => {
+    updateSelection(event.latlng.lat, event.latlng.lng);
+    loadNearbyStop(event.latlng.lat, event.latlng.lng);
+  }, 300);
 });
+map.on("dblclick", () => clearTimeout(clickTimer));
 
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);

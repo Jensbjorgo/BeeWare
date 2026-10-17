@@ -44,7 +44,7 @@ body {
 .shell {
   display: grid;
   grid-template-columns: minmax(320px, 420px) 1fr;
-  min-height: 100vh;
+  height: 100vh;
 }
 
 .panel {
@@ -255,7 +255,7 @@ button:disabled {
 
 #map {
   width: 100%;
-  min-height: 100vh;
+  height: 100%;
 }
 
 .auth-popover {
@@ -322,6 +322,7 @@ button:disabled {
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .map-wrap {
@@ -335,7 +336,7 @@ button:disabled {
   }
 
   #map {
-    min-height: 100vh;
+    height: 60vh;
   }
 
   .selection {
@@ -345,6 +346,6 @@ button:disabled {
   .auth-popover {
     top: 12px;
     right: 12px;
-    width: min(340px, calc(100% - 24px));
+    width: min(340px, calc(100% - 72px));
   }
 }
