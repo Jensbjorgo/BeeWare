@@ -11,6 +11,7 @@ const state = {
   selectedLatLng: null,
   selectionMarker: null,
   currentLocationMarker: null,
+  currentLocationAccuracy: null,
   sightingsLayer: L.layerGroup().addTo(map),
   stopOptions: [],
   user: null,
@@ -141,7 +142,7 @@ function updateSelection(lat, lon) {
   }
 }
 
-function updateCurrentLocation(lat, lon) {
+function updateCurrentLocation(lat, lon, accuracy) {
   if (!state.currentLocationMarker) {
     state.currentLocationMarker = L.marker([lat, lon], {
       icon: makeIcon("user-dot"),
@@ -150,6 +151,19 @@ function updateCurrentLocation(lat, lon) {
       .bindPopup("Du er her");
   } else {
     state.currentLocationMarker.setLatLng([lat, lon]);
+  }
+  if (Number.isFinite(accuracy) && accuracy >= 0) {
+    if (!state.currentLocationAccuracy) {
+      state.currentLocationAccuracy = L.circle([lat, lon], {
+        radius: accuracy,
+        color: "#2563eb",
+        fillOpacity: 0.1,
+        weight: 1,
+        interactive: false,
+      }).addTo(map);
+    } else {
+      state.currentLocationAccuracy.setLatLng([lat, lon]).setRadius(accuracy);
+    }
   }
 }
 
@@ -260,10 +274,10 @@ async function likeSighting(id) {
   }
 }
 
-function handleLocationUpdate(position, shouldCenter = false) {
-  const { latitude, longitude } = position.coords;
-  updateCurrentLocation(latitude, longitude);
-  if (!state.selectedLatLng) {
+function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
+  const { latitude, longitude, accuracy } = position.coords;
+  updateCurrentLocation(latitude, longitude, accuracy);
+  if (selectLocation || !state.selectedLatLng) {
     updateSelection(latitude, longitude);
     loadNearbyStop(latitude, longitude);
   }
@@ -275,7 +289,7 @@ function handleLocationUpdate(position, shouldCenter = false) {
   setStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
 }
 
-function startLocationTracking() {
+function startLocationTracking(selectLocation = false) {
   if (!navigator.geolocation) {
     setStatus("Geolokasjon er ikke tilgjengelig i denne nettleseren.", "error");
     return;
@@ -283,7 +297,7 @@ function startLocationTracking() {
 
   locateBtn.disabled = true;
   navigator.geolocation.getCurrentPosition(
-    (position) => handleLocationUpdate(position, true),
+    (position) => handleLocationUpdate(position, true, selectLocation),
     () => {
       locateBtn.disabled = false;
       setStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
@@ -291,6 +305,9 @@ function startLocationTracking() {
     { enableHighAccuracy: true, timeout: 10000 }
   );
 
+  if (state.watchId !== null) {
+    return;
+  }
   state.watchId = navigator.geolocation.watchPosition(
     (position) => handleLocationUpdate(position, false),
     () => {
@@ -350,7 +367,7 @@ map.on("click", async (event) => {
 });
 
 locateBtn.addEventListener("click", () => {
-  startLocationTracking();
+  startLocationTracking(true);
 });
 
 reportForm.addEventListener("submit", async (event) => {

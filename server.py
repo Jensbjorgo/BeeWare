@@ -71,8 +71,10 @@ class TransitData:
         self.stops_by_id: dict[str, dict[str, Any]] = {}
         self.stop_buckets: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
         self.route_index: list[dict[str, str]] = []
-        self._load_stops(data_dir / "stops.txt")
-        self._load_routes(data_dir / "routes.txt")
+        if (data_dir / "stops.txt").is_file():
+            self._load_stops(data_dir / "stops.txt")
+        if (data_dir / "routes.txt").is_file():
+            self._load_routes(data_dir / "routes.txt")
 
     def _load_stops(self, path: Path) -> None:
         with path.open(newline="", encoding="utf-8") as handle:
