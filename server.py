@@ -8,7 +8,8 @@ import math
 import os
 import secrets
 import threading
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,16 @@ CLIENT_COOKIE = "beeware_client"
 SESSION_TTL_DAYS = 14
 PBKDF2_ITERATIONS = 120_000
 XP_PER_LIKE = 10
+MAX_BODY_BYTES = 4096
+REQUEST_TIMEOUT_SECONDS = 10
+MAX_CONNECTIONS = 64
+STOP_NAME_MAX = 80
+ROUTE_MAX = 40
+NOTE_MAX = 160
+STOP_ID_MAX = 64
+# (requests, seconds) per client IP. Three reports per ten minutes means one
+# client cannot push all active reports out of the 500-report store.
+RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
 
 
 def utc_now() -> datetime:
@@ -66,6 +77,21 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def compact_whitespace(value: str) -> str:
     return " ".join(value.split())
+
+
+def clean_text(value: Any, limit: int) -> str:
+    text = compact_whitespace(str(value or ""))[:limit]
+    text.encode("utf-8")  # Raises UnicodeEncodeError (a ValueError) for lone surrogates.
+    return text
+
+
+def parse_coordinate(value: Any, limit: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError("not a number")
+    number = float(value)
+    if not math.isfinite(number) or abs(number) > limit:
+        raise ValueError("out of range")
+    return number
 
 
 # ponytail: one lock for all JSON stores in one process; move to SQLite if it outgrows that.
@@ -313,11 +339,16 @@ class AuthStore:
 
     def create_session(self, username: str) -> str:
         token = secrets.token_urlsafe(24)
+        now = utc_now()
         with STORE_LOCK:
-            sessions = read_json(self.sessions_path)
+            sessions = {
+                key: value
+                for key, value in read_json(self.sessions_path).items()
+                if parse_iso8601(value["expires_at"]) >= now
+            }
             sessions[token] = {
                 "username": username,
-                "expires_at": (utc_now() + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
+                "expires_at": (now + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
             }
             write_json(self.sessions_path, sessions)
         return token
@@ -350,9 +381,14 @@ class AuthStore:
 transit_data = TransitData(DATA_DIR)
 sighting_store = SightingStore(SIGHTINGS_FILE)
 auth_store = AuthStore(USERS_FILE, SESSIONS_FILE)
+# ponytail: in-memory and per IP; resets on restart, and behind a proxy every
+# client shares the proxy's IP, so read X-Forwarded-For there.
+recent_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
 class AppHandler(SimpleHTTPRequestHandler):
+    timeout = REQUEST_TIMEOUT_SECONDS
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
@@ -367,6 +403,10 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self.send_json({"error": "Forespørselen kommer fra en annen side."}, status=HTTPStatus.FORBIDDEN)
+            return
         if parsed.path == "/api/sightings":
             self.handle_api_post_sighting()
             return
@@ -414,10 +454,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/stops/nearby":
-            lat = self._get_float(params, "lat")
-            lon = self._get_float(params, "lon")
-            if lat is None or lon is None:
-                self.send_json({"error": "lat and lon are required"}, status=HTTPStatus.BAD_REQUEST)
+            try:
+                lat = parse_coordinate(params.get("lat", [None])[0], 90)
+                lon = parse_coordinate(params.get("lon", [None])[0], 180)
+            except (TypeError, ValueError):
+                self.send_json({"error": "lat and lon must be valid coordinates"}, status=HTTPStatus.BAD_REQUEST)
                 return
             self.send_json({"items": transit_data.find_nearby_stops(lat, lon)})
             return
@@ -430,21 +471,23 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json({"error": "Unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
 
     def handle_api_post_sighting(self) -> None:
+        if self.reject_if_rate_limited("sighting"):
+            return
         user = self.current_user()
         data = self.read_json_body()
         if data is None:
             return
 
         try:
-            lat = float(data["lat"])
-            lon = float(data["lon"])
-        except (KeyError, TypeError, ValueError):
-            self.send_json({"error": "lat and lon must be numbers"}, status=HTTPStatus.BAD_REQUEST)
+            lat = parse_coordinate(data.get("lat"), 90)
+            lon = parse_coordinate(data.get("lon"), 180)
+            stop_name = clean_text(data.get("stop_name"), STOP_NAME_MAX)
+            route = clean_text(data.get("route"), ROUTE_MAX)
+            note = clean_text(data.get("note"), NOTE_MAX)
+            stop_id = clean_text(data.get("stop_id"), STOP_ID_MAX)
+        except (TypeError, ValueError):
+            self.send_json({"error": "Ugyldig posisjon eller tekst."}, status=HTTPStatus.BAD_REQUEST)
             return
-
-        stop_name = compact_whitespace(str(data.get("stop_name") or ""))
-        route = compact_whitespace(str(data.get("route") or ""))
-        note = compact_whitespace(str(data.get("note") or ""))
 
         nearby = transit_data.find_nearby_stops(lat, lon, limit=1)
         nearest = nearby[0] if nearby else None
@@ -454,10 +497,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             "lat": lat,
             "lon": lon,
             "route": route,
-            "note": note[:160],
+            "note": note,
             "reporter": user["username"][:40] if user else "Anonym",
             "created_at": utc_now().isoformat(),
-            "stop_id": data.get("stop_id") or (nearest["id"] if nearest else ""),
+            "stop_id": stop_id or (nearest["id"] if nearest else ""),
             "stop_name": stop_name or (nearest["name"] if nearest else "Ukjent sted"),
             "distance_to_stop_m": nearest["distance_m"] if nearest else None,
             "liked_by": [],
@@ -479,6 +522,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json({"item": sighting_store.serialize(item, self.current_client_id())})
 
     def handle_register(self) -> None:
+        if self.reject_if_rate_limited("register"):
+            return
         data = self.read_json_body()
         if data is None:
             return
@@ -497,6 +542,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json({"user": user}, status=HTTPStatus.CREATED, cookie_token=token)
 
     def handle_login(self) -> None:
+        if self.reject_if_rate_limited("login"):
+            return
         data = self.read_json_body()
         if data is None:
             return
@@ -523,14 +570,40 @@ class AppHandler(SimpleHTTPRequestHandler):
             return "Brukernavn kan bare inneholde bokstaver, tall, bindestrek og understrek."
         if len(password) < 6:
             return "Passord må være minst 6 tegn."
+        try:
+            password.encode("utf-8")
+        except UnicodeEncodeError:
+            return "Passordet inneholder ugyldige tegn."
         return None
 
+    def reject_if_rate_limited(self, action: str) -> bool:
+        limit, window = RATE_LIMITS[action]
+        now = time.monotonic()
+        with STORE_LOCK:
+            hits = recent_requests[(action, self.client_address[0])]
+            while hits and hits[0] <= now - window:
+                hits.popleft()
+            if len(hits) < limit:
+                hits.append(now)
+                return False
+        self.send_json({"error": "For mange forsøk. Vent litt og prøv igjen."}, status=HTTPStatus.TOO_MANY_REQUESTS)
+        return True
+
     def read_json_body(self) -> dict[str, Any] | None:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        if self.headers.get_content_type() != "application/json":
+            self.send_json({"error": "Content-Type must be application/json"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            return None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = -1
+        if not 0 <= content_length <= MAX_BODY_BYTES:
+            self.send_json({"error": "Invalid or too large body"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return None
         body = self.rfile.read(content_length)
         try:
             data = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             self.send_json({"error": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
             return None
         if not isinstance(data, dict):
@@ -560,15 +633,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return value
         return None
 
-    def _get_float(self, params: dict[str, list[str]], key: str) -> float | None:
-        raw = params.get(key, [None])[0]
-        if raw is None:
-            return None
-        try:
-            return float(raw)
-        except ValueError:
-            return None
-
     def send_json(
         self,
         payload: dict[str, Any],
@@ -577,6 +641,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         clear_cookie: bool = False,
     ) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
@@ -585,28 +650,44 @@ class AppHandler(SimpleHTTPRequestHandler):
             max_age = SESSION_TTL_DAYS * 24 * 60 * 60
             self.send_header(
                 "Set-Cookie",
-                f"{SESSION_COOKIE}={cookie_token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax",
+                f"{SESSION_COOKIE}={cookie_token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         client_cookie = self.current_client_id()
         if self.cookie_value(CLIENT_COOKIE) != client_cookie:
             max_age = 365 * 24 * 60 * 60
             self.send_header(
                 "Set-Cookie",
-                f"{CLIENT_COOKIE}={client_cookie}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax",
+                f"{CLIENT_COOKIE}={client_cookie}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         if clear_cookie:
             self.send_header(
                 "Set-Cookie",
-                f"{SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+                f"{SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         self.end_headers()
         self.wfile.write(raw)
 
 
+class AppServer(ThreadingHTTPServer):
+    connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self.connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.connection_slots.release()
+
+
 def run() -> None:
     host = "127.0.0.1"
     port = 8080
-    server = ThreadingHTTPServer((host, port), AppHandler)
+    server = AppServer((host, port), AppHandler)
     print(f"Serving BeeWare on http://{host}:{port}")
     server.serve_forever()
 
