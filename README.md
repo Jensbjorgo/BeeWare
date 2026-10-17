@@ -10,7 +10,7 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Henter nærmeste holdeplass fra GTFS-dataene i `data/stops.txt`.
 - Lar brukeren knytte observasjonen til busslinje fra `data/routes.txt`.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
-- Lar andre bekrefte observasjoner med likes.
+- Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
 - Deler observasjoner mellom brukere som åpner samme server.
 
 ## Kjør lokalt
@@ -32,9 +32,16 @@ holdeplass- og linjesøk gir ingen treff. Sted og linje kan skrives inn manuelt.
 ## Lagring
 
 Observasjoner lagres i `storage/sightings.json` og vises i 3 timer før de ryddes bort automatisk.
-Brukere lagres i `storage/users.json` og aktive sesjoner i `storage/sessions.json`.
-Nettleseren får også en lokal klient-cookie for å holde styr på likes per enhet/nettleser.
+Brukere, med XP og antall likes, lagres i `storage/users.json` og aktive sesjoner i `storage/sessions.json`.
+XP blir værende når observasjonen utløper.
 `storage/` opprettes automatisk og ignoreres av Git. Ikke del brukerdata eller sesjonsfiler.
+
+## Grenser
+
+- Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
+- Forespørsler kan være på maks 4 KB, og POST fra andre nettsteder avvises.
+- Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`, får cookiene `Secure`.
+  Grensene gjelder per IP, så bak en proxy deler alle proxyens IP.
 
 ## Teknisk
 
