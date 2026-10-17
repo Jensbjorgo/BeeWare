@@ -1,6 +1,7 @@
 const map = L.map("map", {
   zoomControl: true,
 });
+map.setView([58.1467, 7.9956], 11);
 
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
@@ -13,7 +14,6 @@ const state = {
   currentLocationMarker: null,
   currentLocationAccuracy: null,
   sightingsLayer: L.layerGroup().addTo(map),
-  stopOptions: [],
   user: null,
   stats: null,
   authOpen: false,
@@ -215,18 +215,10 @@ function renderSightings(items) {
 
 async function loadConfig() {
   const payload = await fetchJson("/api/config");
-  map.setView([payload.center.lat, payload.center.lon], 11);
   ttlLabel.textContent = `Observasjoner vises i ${payload.ttl_hours} timer.`;
 }
 
 async function loadCurrentUser() {
-  const payload = await fetchJson("/api/me");
-  state.user = payload.user;
-  state.stats = payload.stats;
-  updateAuthUi();
-}
-
-async function refreshUserStats() {
   const payload = await fetchJson("/api/me");
   state.user = payload.user;
   state.stats = payload.stats;
@@ -239,10 +231,19 @@ async function loadSightings() {
   renderSightings(payload.items);
 }
 
+// Only the newest position may fill in the stop; older answers are dropped.
+let nearbyRequest = 0;
+
 async function loadNearbyStop(lat, lon) {
+  const request = ++nearbyRequest;
   nearestStop.textContent = "Laster...";
+  stopInput.value = "";
+  stopInput.dataset.stopId = "";
   try {
     const payload = await fetchJson(`/api/stops/nearby?lat=${lat}&lon=${lon}`);
+    if (request !== nearbyRequest) {
+      return;
+    }
     const [closest] = payload.items;
     if (!closest) {
       nearestStop.textContent = "Fant ingen holdeplass.";
@@ -252,7 +253,9 @@ async function loadNearbyStop(lat, lon) {
     stopInput.value = closest.name;
     stopInput.dataset.stopId = closest.id;
   } catch (error) {
-    nearestStop.textContent = error.message;
+    if (request === nearbyRequest) {
+      nearestStop.textContent = error.message;
+    }
   }
 }
 
@@ -270,7 +273,7 @@ async function likeSighting(id) {
   });
   await loadSightings();
   if (state.user) {
-    await refreshUserStats();
+    await loadCurrentUser();
   }
 }
 
@@ -326,13 +329,17 @@ stopInput.addEventListener("input", async () => {
     stopOptions.innerHTML = "";
     return;
   }
-  state.stopOptions = await fillDatalist(
+  const options = await fillDatalist(
     `/api/stops/search?q=${encodeURIComponent(query)}`,
     stopOptions,
     (item) => item.name
   );
-  const exact = state.stopOptions.find((item) => item.name === query);
+  const exact = options.find((item) => item.name === query);
   if (exact) {
+    nearbyRequest++;
+    updateSelection(exact.lat, exact.lon);
+    map.panTo([exact.lat, exact.lon]);
+    nearestStop.textContent = `${exact.name} (valgt)`;
     stopInput.dataset.stopId = exact.id;
   }
 });
@@ -401,7 +408,7 @@ reportForm.addEventListener("submit", async (event) => {
     setStatus(state.user ? "Observasjonen er publisert på profilen din." : "Observasjonen er publisert anonymt.", "ok");
     await loadSightings();
     if (state.user) {
-      await refreshUserStats();
+      await loadCurrentUser();
     }
   } catch (error) {
     setStatus(error.message, "error");
@@ -419,16 +426,15 @@ loginForm.addEventListener("submit", async (event) => {
   const username = document.querySelector("#loginUsername").value.trim();
   const password = document.querySelector("#loginPassword").value;
   try {
-    const payload = await fetchJson("/api/auth/login", {
+    await fetchJson("/api/auth/login", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ username, password }),
     });
-    state.user = payload.user;
-    await refreshUserStats();
-    updateAuthUi();
+    await loadCurrentUser();
+    await loadSightings();
     toggleAuth(true);
     setAuthStatus("Innlogging vellykket.", "ok");
     loginForm.reset();
@@ -442,16 +448,15 @@ registerForm.addEventListener("submit", async (event) => {
   const username = document.querySelector("#registerUsername").value.trim();
   const password = document.querySelector("#registerPassword").value;
   try {
-    const payload = await fetchJson("/api/auth/register", {
+    await fetchJson("/api/auth/register", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ username, password }),
     });
-    state.user = payload.user;
-    await refreshUserStats();
-    updateAuthUi();
+    await loadCurrentUser();
+    await loadSightings();
     toggleAuth(true);
     setAuthStatus("Profil opprettet.", "ok");
     registerForm.reset();
@@ -468,10 +473,13 @@ logoutBtn.addEventListener("click", async () => {
   state.stats = null;
   updateAuthUi();
   setAuthStatus("Du er logget ut. Observasjoner kan fortsatt sendes anonymt.", "ok");
+  await loadSightings();
 });
 
-await loadConfig();
-await loadCurrentUser();
-await loadSightings();
+// Each part starts on its own, so one failed request cannot stop GPS or refreshing.
+const showLoadError = (error) => setStatus(error.message, "error");
+loadConfig().catch(showLoadError);
+loadCurrentUser().catch((error) => setAuthStatus(error.message, "error"));
+loadSightings().catch(showLoadError);
 startLocationTracking();
-setInterval(loadSightings, 20000);
+setInterval(() => loadSightings().catch(showLoadError), 20000);

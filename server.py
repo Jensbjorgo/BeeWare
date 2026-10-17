@@ -27,7 +27,6 @@ SIGHTINGS_FILE = STORAGE_DIR / "sightings.json"
 USERS_FILE = STORAGE_DIR / "users.json"
 SESSIONS_FILE = STORAGE_DIR / "sessions.json"
 
-DEFAULT_CENTER = {"lat": 58.1467, "lon": 7.9956}
 SIGHTING_TTL_HOURS = 3
 MAX_SIGHTINGS = 500
 STOP_SEARCH_LIMIT = 12
@@ -417,12 +416,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def handle_api_get(self, parsed: Any) -> None:
         params = parse_qs(parsed.query)
         if parsed.path == "/api/config":
-            self.send_json(
-                {
-                    "center": DEFAULT_CENTER,
-                    "ttl_hours": SIGHTING_TTL_HOURS,
-                }
-            )
+            self.send_json({"ttl_hours": SIGHTING_TTL_HOURS})
             return
 
         if parsed.path == "/api/me":

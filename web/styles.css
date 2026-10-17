@@ -246,7 +246,7 @@ button:disabled {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .map-wrap {
