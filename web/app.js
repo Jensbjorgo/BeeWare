@@ -1,5 +1,7 @@
+// Double-click zoom is off: its two clicks would also move the report position.
 const map = L.map("map", {
   zoomControl: true,
+  doubleClickZoom: false,
 });
 map.setView([58.1467, 7.9956], 11);
 
@@ -231,17 +233,17 @@ async function loadSightings() {
   renderSightings(payload.items);
 }
 
-// Only the newest position may fill in the stop; older answers are dropped.
-let nearbyRequest = 0;
+// Only the newest position change or stop search may fill in the stop; older answers are dropped.
+let stopRequest = 0;
 
 async function loadNearbyStop(lat, lon) {
-  const request = ++nearbyRequest;
+  const request = ++stopRequest;
   nearestStop.textContent = "Laster...";
   stopInput.value = "";
   stopInput.dataset.stopId = "";
   try {
     const payload = await fetchJson(`/api/stops/nearby?lat=${lat}&lon=${lon}`);
-    if (request !== nearbyRequest) {
+    if (request !== stopRequest) {
       return;
     }
     const [closest] = payload.items;
@@ -253,18 +255,16 @@ async function loadNearbyStop(lat, lon) {
     stopInput.value = closest.name;
     stopInput.dataset.stopId = closest.id;
   } catch (error) {
-    if (request === nearbyRequest) {
+    if (request === stopRequest) {
       nearestStop.textContent = error.message;
     }
   }
 }
 
-async function fillDatalist(url, datalistEl, toLabel) {
-  const payload = await fetchJson(url);
-  datalistEl.innerHTML = payload.items
+function renderOptions(datalistEl, items, toLabel) {
+  datalistEl.innerHTML = items
     .map((item) => `<option value="${escapeHtml(toLabel(item))}"></option>`)
     .join("");
-  return payload.items;
 }
 
 async function likeSighting(id) {
@@ -323,20 +323,20 @@ function startLocationTracking(selectLocation = false) {
 }
 
 stopInput.addEventListener("input", async () => {
+  const request = ++stopRequest;
   const query = stopInput.value.trim();
   stopInput.dataset.stopId = "";
   if (query.length < 2) {
     stopOptions.innerHTML = "";
     return;
   }
-  const options = await fillDatalist(
-    `/api/stops/search?q=${encodeURIComponent(query)}`,
-    stopOptions,
-    (item) => item.name
-  );
-  const exact = options.find((item) => item.name === query);
+  const payload = await fetchJson(`/api/stops/search?q=${encodeURIComponent(query)}`);
+  if (request !== stopRequest) {
+    return;
+  }
+  renderOptions(stopOptions, payload.items, (item) => item.name);
+  const exact = payload.items.find((item) => item.name === query);
   if (exact) {
-    nearbyRequest++;
     updateSelection(exact.lat, exact.lon);
     map.panTo([exact.lat, exact.lon]);
     nearestStop.textContent = `${exact.name} (valgt)`;
@@ -346,11 +346,8 @@ stopInput.addEventListener("input", async () => {
 
 routeInput.addEventListener("input", async () => {
   const query = routeInput.value.trim();
-  await fillDatalist(
-    `/api/routes?q=${encodeURIComponent(query)}`,
-    routeOptions,
-    (item) => item.short_name
-  );
+  const payload = await fetchJson(`/api/routes?q=${encodeURIComponent(query)}`);
+  renderOptions(routeOptions, payload.items, (item) => item.short_name);
 });
 
 feed.addEventListener("click", async (event) => {
@@ -368,16 +365,10 @@ feed.addEventListener("click", async (event) => {
   }
 });
 
-// A double-click zooms, so wait briefly to keep its two clicks from moving the report position.
-let clickTimer;
-map.on("click", (event) => {
-  clearTimeout(clickTimer);
-  clickTimer = setTimeout(() => {
-    updateSelection(event.latlng.lat, event.latlng.lng);
-    loadNearbyStop(event.latlng.lat, event.latlng.lng);
-  }, 300);
+map.on("click", async (event) => {
+  updateSelection(event.latlng.lat, event.latlng.lng);
+  await loadNearbyStop(event.latlng.lat, event.latlng.lng);
 });
-map.on("dblclick", () => clearTimeout(clickTimer));
 
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);
@@ -488,4 +479,4 @@ loadConfig().catch(showLoadError);
 loadCurrentUser().catch((error) => setAuthStatus(error.message, "error"));
 loadSightings().catch(showLoadError);
 startLocationTracking();
-setInterval(() => loadSightings().catch(showLoadError), 20000);
+setInterval(() => Promise.all([loadSightings(), loadCurrentUser()]).catch(showLoadError), 20000);

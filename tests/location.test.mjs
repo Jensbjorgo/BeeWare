@@ -32,10 +32,9 @@ async function setup(route = () => undefined) {
   let watchCallback;
   let watches = 0;
   let intervals = 0;
-  const mapHandlers = {};
   const context = vm.createContext({
     L: {
-      map: () => ({ on(event, handler) { mapHandlers[event] = handler; }, setView() {}, flyTo() {}, panTo() {} }),
+      map: () => ({ on() {}, setView() {}, flyTo() {}, panTo() {} }),
       tileLayer: layer, layerGroup: layer, marker: layer, circle: layer,
       divIcon: (options) => options,
     },
@@ -46,8 +45,6 @@ async function setup(route = () => undefined) {
     } },
     fetch: (url) => route(url) ?? reply({ ttl_hours: 3, user: null, stats: null, items: [] }),
     setInterval() { intervals++; },
-    setTimeout,
-    clearTimeout,
   });
   const app = vm.runInContext(
     `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop }; })()`, context,
@@ -61,7 +58,6 @@ async function setup(route = () => undefined) {
     watch: (lat, lon, accuracy = 25) => watchCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watches: () => watches,
     intervals: () => intervals,
-    mapEvent: (event, payload) => mapHandlers[event](payload),
   };
 }
 
@@ -130,15 +126,19 @@ test("startup keeps GPS and refreshing when the first API calls fail", async () 
   assert.equal(app.element("#formStatus").textContent, "Serveren svarer ikke.");
 });
 
-test("double-click zooms without moving the report position", async () => {
-  const app = await setup();
-  const wait = () => new Promise((resolve) => setTimeout(resolve, 350));
-  app.mapEvent("click", { latlng: { lat: 58, lng: 8 } });
-  app.mapEvent("click", { latlng: { lat: 58, lng: 8 } });
-  app.mapEvent("dblclick");
-  await wait();
-  assert.equal(app.state.selectedLatLng, null);
-  app.mapEvent("click", { latlng: { lat: 59, lng: 9 } });
-  await wait();
+test("a late stop-search answer cannot move the report position", async () => {
+  const pending = [];
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? new Promise((resolve) => pending.push(resolve)) : undefined);
+  const stop = app.element("#stopInput");
+  stop.value = "Alfa";
+  const first = stop.input();
+  stop.value = "Beta";
+  const second = stop.input();
+  pending[1](reply({ items: [{ id: "B", name: "Beta", lat: 59, lon: 9 }] }));
+  await second;
+  pending[0](reply({ items: [{ id: "A", name: "Alfa", lat: 58, lon: 8 }] }));
+  await first;
   assert.equal(app.state.selectedLatLng.lat, 59);
+  assert.equal(stop.dataset.stopId, "B");
 });
