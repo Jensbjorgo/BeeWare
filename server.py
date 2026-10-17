@@ -5,7 +5,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 import secrets
+import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -64,6 +66,22 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def compact_whitespace(value: str) -> str:
     return " ".join(value.split())
+
+
+# ponytail: one lock for all JSON stores in one process; move to SQLite if it outgrows that.
+STORE_LOCK = threading.RLock()
+
+
+def read_json(path: Path) -> Any:
+    # A broken file raises instead of being treated as empty and overwritten.
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: Any) -> None:
+    raw = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    temp = path.with_suffix(".tmp")
+    temp.write_bytes(raw)
+    os.replace(temp, path)
 
 
 class TransitData:
@@ -189,18 +207,9 @@ class SightingStore:
         if not self.path.exists():
             self.path.write_text("[]\n", encoding="utf-8")
 
-    def _read_all(self) -> list[dict[str, Any]]:
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-
-    def _write_all(self, payload: list[dict[str, Any]]) -> None:
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     def _active_items(self) -> list[dict[str, Any]]:
         cutoff = utc_now() - timedelta(hours=SIGHTING_TTL_HOURS)
-        sightings = self._read_all()
+        sightings = read_json(self.path)
         active = [item for item in sightings if parse_iso8601(item["created_at"]) >= cutoff]
         active.sort(key=lambda item: item["created_at"], reverse=True)
         return active[:MAX_SIGHTINGS]
@@ -214,32 +223,37 @@ class SightingStore:
         }
 
     def list_recent(self, client_id: str | None = None) -> list[dict[str, Any]]:
-        return [self.serialize(item, client_id) for item in self._active_items()]
+        with STORE_LOCK:
+            items = self._active_items()
+        return [self.serialize(item, client_id) for item in items]
 
     def add(self, payload: dict[str, Any]) -> dict[str, Any]:
-        sightings = self._active_items()
-        sightings.insert(0, payload)
-        self._write_all(sightings[:MAX_SIGHTINGS])
+        with STORE_LOCK:
+            sightings = self._active_items()
+            sightings.insert(0, payload)
+            write_json(self.path, sightings[:MAX_SIGHTINGS])
         return payload
 
     def like(self, sighting_id: str, client_id: str) -> dict[str, Any] | None:
-        sightings = self._active_items()
-        updated_item = None
-        for item in sightings:
-            if item.get("id") != sighting_id:
-                continue
-            liked_by = item.setdefault("liked_by", [])
-            if client_id not in liked_by:
-                liked_by.append(client_id)
-            updated_item = item
-            break
-        if updated_item is None:
-            return None
-        self._write_all(sightings[:MAX_SIGHTINGS])
+        with STORE_LOCK:
+            sightings = self._active_items()
+            updated_item = None
+            for item in sightings:
+                if item.get("id") != sighting_id:
+                    continue
+                liked_by = item.setdefault("liked_by", [])
+                if client_id not in liked_by:
+                    liked_by.append(client_id)
+                updated_item = item
+                break
+            if updated_item is None:
+                return None
+            write_json(self.path, sightings[:MAX_SIGHTINGS])
         return updated_item
 
     def stats_for_user(self, username: str) -> dict[str, int]:
-        sightings = self._read_all()
+        with STORE_LOCK:
+            sightings = read_json(self.path)
         likes_received = sum(len(item.get("liked_by") or []) for item in sightings if item.get("reporter") == username)
         sightings_count = sum(1 for item in sightings if item.get("reporter") == username)
         xp = likes_received * XP_PER_LIKE
@@ -261,16 +275,6 @@ class AuthStore:
             if not path.exists():
                 path.write_text("{}\n", encoding="utf-8")
 
-    def _read_json(self, path: Path) -> dict[str, Any]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     def _hash_password(self, password: str, salt_hex: str) -> str:
         digest = hashlib.pbkdf2_hmac(
             "sha256",
@@ -281,23 +285,24 @@ class AuthStore:
         return digest.hex()
 
     def create_user(self, username: str, password: str) -> dict[str, str]:
-        users = self._read_json(self.users_path)
-        key = username.casefold()
-        if key in users:
-            raise ValueError("Brukernavnet er allerede i bruk.")
-
         salt = secrets.token_hex(16)
-        users[key] = {
-            "username": username,
-            "salt": salt,
-            "password_hash": self._hash_password(password, salt),
-            "created_at": utc_now().isoformat(),
-        }
-        self._write_json(self.users_path, users)
+        password_hash = self._hash_password(password, salt)
+        key = username.casefold()
+        with STORE_LOCK:
+            users = read_json(self.users_path)
+            if key in users:
+                raise ValueError("Brukernavnet er allerede i bruk.")
+            users[key] = {
+                "username": username,
+                "salt": salt,
+                "password_hash": password_hash,
+                "created_at": utc_now().isoformat(),
+            }
+            write_json(self.users_path, users)
         return {"username": username}
 
     def authenticate(self, username: str, password: str) -> dict[str, str] | None:
-        users = self._read_json(self.users_path)
+        users = read_json(self.users_path)
         user = users.get(username.casefold())
         if not user:
             return None
@@ -307,36 +312,39 @@ class AuthStore:
         return {"username": user["username"]}
 
     def create_session(self, username: str) -> str:
-        sessions = self._read_json(self.sessions_path)
         token = secrets.token_urlsafe(24)
-        sessions[token] = {
-            "username": username,
-            "expires_at": (utc_now() + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
-        }
-        self._write_json(self.sessions_path, sessions)
+        with STORE_LOCK:
+            sessions = read_json(self.sessions_path)
+            sessions[token] = {
+                "username": username,
+                "expires_at": (utc_now() + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
+            }
+            write_json(self.sessions_path, sessions)
         return token
 
     def get_session_user(self, token: str | None) -> dict[str, str] | None:
         if not token:
             return None
 
-        sessions = self._read_json(self.sessions_path)
-        session = sessions.get(token)
-        if not session:
-            return None
-        if parse_iso8601(session["expires_at"]) < utc_now():
-            sessions.pop(token, None)
-            self._write_json(self.sessions_path, sessions)
-            return None
+        with STORE_LOCK:
+            sessions = read_json(self.sessions_path)
+            session = sessions.get(token)
+            if not session:
+                return None
+            if parse_iso8601(session["expires_at"]) < utc_now():
+                sessions.pop(token, None)
+                write_json(self.sessions_path, sessions)
+                return None
         return {"username": session["username"]}
 
     def delete_session(self, token: str | None) -> None:
         if not token:
             return
-        sessions = self._read_json(self.sessions_path)
-        if token in sessions:
-            sessions.pop(token, None)
-            self._write_json(self.sessions_path, sessions)
+        with STORE_LOCK:
+            sessions = read_json(self.sessions_path)
+            if token in sessions:
+                sessions.pop(token, None)
+                write_json(self.sessions_path, sessions)
 
 
 transit_data = TransitData(DATA_DIR)
