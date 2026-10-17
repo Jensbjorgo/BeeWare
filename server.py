@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -26,13 +27,13 @@ SIGHTINGS_FILE = STORAGE_DIR / "sightings.json"
 USERS_FILE = STORAGE_DIR / "users.json"
 SESSIONS_FILE = STORAGE_DIR / "sessions.json"
 
-BUCKET_SIZE = 0.01
 DEFAULT_CENTER = {"lat": 58.1467, "lon": 7.9956}
 SIGHTING_TTL_HOURS = 3
 MAX_SIGHTINGS = 500
 STOP_SEARCH_LIMIT = 12
 ROUTE_SEARCH_LIMIT = 12
 NEARBY_STOP_LIMIT = 6
+NEARBY_RADIUS_KM = 2.0
 EARTH_RADIUS_KM = 6371.0
 SESSION_COOKIE = "beeware_session"
 SESSION_TTL_DAYS = 14
@@ -112,7 +113,6 @@ def write_json(path: Path, payload: Any) -> None:
 class TransitData:
     def __init__(self, data_dir: Path) -> None:
         self.stops_by_id: dict[str, dict[str, Any]] = {}
-        self.stop_buckets: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
         self.route_index: list[dict[str, str]] = []
         if (data_dir / "stops.txt").is_file():
             self._load_stops(data_dir / "stops.txt")
@@ -138,7 +138,6 @@ class TransitData:
                     "description": compact_whitespace(row.get("stop_desc") or ""),
                 }
                 self.stops_by_id[stop["id"]] = stop
-                self.stop_buckets[self._bucket_key(lat, lon)].append(stop)
 
     def _load_routes(self, path: Path) -> None:
         seen: set[tuple[str, str]] = set()
@@ -160,9 +159,6 @@ class TransitData:
                     }
                 )
         self.route_index.sort(key=lambda item: item["short_name"])
-
-    def _bucket_key(self, lat: float, lon: float) -> tuple[int, int]:
-        return (round(lat / BUCKET_SIZE), round(lon / BUCKET_SIZE))
 
     def search_stops(self, query: str, limit: int = STOP_SEARCH_LIMIT) -> list[dict[str, Any]]:
         needle = compact_whitespace(query).casefold()
@@ -201,28 +197,14 @@ class TransitData:
     def find_nearby_stops(
         self, lat: float, lon: float, limit: int = NEARBY_STOP_LIMIT
     ) -> list[dict[str, Any]]:
-        base_bucket = self._bucket_key(lat, lon)
-        candidates: list[tuple[float, dict[str, Any]]] = []
-        for lat_offset in range(-2, 3):
-            for lon_offset in range(-2, 3):
-                bucket = (
-                    base_bucket[0] + lat_offset,
-                    base_bucket[1] + lon_offset,
-                )
-                for stop in self.stop_buckets.get(bucket, []):
-                    distance_km = haversine_km(lat, lon, stop["lat"], stop["lon"])
-                    candidates.append((distance_km, stop))
-
-        candidates.sort(key=lambda item: item[0])
-        nearby = []
-        for distance_km, stop in candidates[:limit]:
-            nearby.append(
-                {
-                    **stop,
-                    "distance_m": int(distance_km * 1000),
-                }
-            )
-        return nearby
+        # ponytail: scans every stop; add a spatial index if a national feed makes this slow.
+        distances = ((haversine_km(lat, lon, stop["lat"], stop["lon"]), stop) for stop in self.stops_by_id.values())
+        nearest = heapq.nsmallest(limit, distances, key=lambda item: item[0])
+        return [
+            {**stop, "distance_m": int(distance_km * 1000)}
+            for distance_km, stop in nearest
+            if distance_km <= NEARBY_RADIUS_KM
+        ]
 
 
 class SightingStore:
