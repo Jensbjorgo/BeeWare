@@ -35,7 +35,6 @@ ROUTE_SEARCH_LIMIT = 12
 NEARBY_STOP_LIMIT = 6
 EARTH_RADIUS_KM = 6371.0
 SESSION_COOKIE = "beeware_session"
-CLIENT_COOKIE = "beeware_client"
 SESSION_TTL_DAYS = 14
 PBKDF2_ITERATIONS = 120_000
 XP_PER_LIKE = 10
@@ -240,18 +239,19 @@ class SightingStore:
         active.sort(key=lambda item: item["created_at"], reverse=True)
         return active[:MAX_SIGHTINGS]
 
-    def serialize(self, item: dict[str, Any], client_id: str | None = None) -> dict[str, Any]:
+    def serialize(self, item: dict[str, Any], user_key: str | None = None) -> dict[str, Any]:
         liked_by = item.get("liked_by") or []
+        public = {key: value for key, value in item.items() if key not in ("liked_by", "owner")}
         return {
-            **item,
+            **public,
             "likes_count": len(liked_by),
-            "liked_by_me": bool(client_id and client_id in liked_by),
+            "liked_by_me": bool(user_key and user_key in liked_by),
         }
 
-    def list_recent(self, client_id: str | None = None) -> list[dict[str, Any]]:
+    def list_recent(self, user_key: str | None = None) -> list[dict[str, Any]]:
         with STORE_LOCK:
             items = self._active_items()
-        return [self.serialize(item, client_id) for item in items]
+        return [self.serialize(item, user_key) for item in items]
 
     def add(self, payload: dict[str, Any]) -> dict[str, Any]:
         with STORE_LOCK:
@@ -260,36 +260,21 @@ class SightingStore:
             write_json(self.path, sightings[:MAX_SIGHTINGS])
         return payload
 
-    def like(self, sighting_id: str, client_id: str) -> dict[str, Any] | None:
+    def like(self, sighting_id: str, user_key: str) -> tuple[dict[str, Any], bool]:
+        """Returns the sighting and whether this like is new."""
         with STORE_LOCK:
             sightings = self._active_items()
-            updated_item = None
-            for item in sightings:
-                if item.get("id") != sighting_id:
-                    continue
-                liked_by = item.setdefault("liked_by", [])
-                if client_id not in liked_by:
-                    liked_by.append(client_id)
-                updated_item = item
-                break
-            if updated_item is None:
-                return None
-            write_json(self.path, sightings[:MAX_SIGHTINGS])
-        return updated_item
-
-    def stats_for_user(self, username: str) -> dict[str, int]:
-        with STORE_LOCK:
-            sightings = read_json(self.path)
-        likes_received = sum(len(item.get("liked_by") or []) for item in sightings if item.get("reporter") == username)
-        sightings_count = sum(1 for item in sightings if item.get("reporter") == username)
-        xp = likes_received * XP_PER_LIKE
-        level = max(1, int(math.sqrt(xp / XP_PER_LIKE)) + 1 if xp else 1)
-        return {
-            "xp": xp,
-            "level": level,
-            "likes_received": likes_received,
-            "sightings_count": sightings_count,
-        }
+            item = next((item for item in sightings if item.get("id") == sighting_id), None)
+            if item is None:
+                raise LookupError(sighting_id)
+            if item.get("owner") == user_key:
+                raise ValueError("Du kan ikke bekrefte din egen observasjon.")
+            liked_by = item.setdefault("liked_by", [])
+            if user_key in liked_by:
+                return item, False
+            liked_by.append(user_key)
+            write_json(self.path, sightings)
+        return item, True
 
 
 class AuthStore:
@@ -336,6 +321,26 @@ class AuthStore:
         if not secrets.compare_digest(password_hash, user["password_hash"]):
             return None
         return {"username": user["username"]}
+
+    def add_stats(self, user_key: str, **increments: int) -> None:
+        with STORE_LOCK:
+            users = read_json(self.users_path)
+            user = users.get(user_key)
+            if user is None:
+                return
+            for field, amount in increments.items():
+                user[field] = user.get(field, 0) + amount
+            write_json(self.users_path, users)
+
+    def stats(self, username: str) -> dict[str, int]:
+        user = read_json(self.users_path).get(username.casefold(), {})
+        xp = user.get("xp", 0)
+        return {
+            "xp": xp,
+            "level": int(math.sqrt(xp / XP_PER_LIKE)) + 1,
+            "likes_received": user.get("likes_received", 0),
+            "sightings_count": user.get("sightings_count", 0),
+        }
 
     def create_session(self, username: str) -> str:
         token = secrets.token_urlsafe(24)
@@ -440,12 +445,12 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/me":
             user = self.current_user()
-            stats = sighting_store.stats_for_user(user["username"]) if user else None
+            stats = auth_store.stats(user["username"]) if user else None
             self.send_json({"user": user, "stats": stats})
             return
 
         if parsed.path == "/api/sightings":
-            self.send_json({"items": sighting_store.list_recent(self.current_client_id())})
+            self.send_json({"items": sighting_store.list_recent(self.current_user_key())})
             return
 
         if parsed.path == "/api/stops/search":
@@ -492,13 +497,15 @@ class AppHandler(SimpleHTTPRequestHandler):
         nearby = transit_data.find_nearby_stops(lat, lon, limit=1)
         nearest = nearby[0] if nearby else None
 
+        owner = user["username"].casefold() if user else None
         payload = {
-            "id": f"sighting-{int(utc_now().timestamp() * 1000)}",
+            "id": secrets.token_hex(16),
             "lat": lat,
             "lon": lon,
             "route": route,
             "note": note,
-            "reporter": user["username"][:40] if user else "Anonym",
+            "reporter": user["username"] if user else "Anonym",
+            "owner": owner,
             "created_at": utc_now().isoformat(),
             "stop_id": stop_id or (nearest["id"] if nearest else ""),
             "stop_name": stop_name or (nearest["name"] if nearest else "Ukjent sted"),
@@ -506,7 +513,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             "liked_by": [],
         }
         sighting_store.add(payload)
-        self.send_json(sighting_store.serialize(payload, self.current_client_id()), status=HTTPStatus.CREATED)
+        if owner:
+            auth_store.add_stats(owner, sightings_count=1)
+        self.send_json(sighting_store.serialize(payload, owner), status=HTTPStatus.CREATED)
 
     def handle_like_sighting(self, path: str) -> None:
         prefix = "/api/sightings/"
@@ -515,11 +524,22 @@ class AppHandler(SimpleHTTPRequestHandler):
         if not sighting_id:
             self.send_json({"error": "Ugyldig observasjon."}, status=HTTPStatus.BAD_REQUEST)
             return
-        item = sighting_store.like(sighting_id, self.current_client_id())
-        if item is None:
+        user_key = self.current_user_key()
+        if not user_key:
+            self.send_json({"error": "Logg inn for å bekrefte observasjoner."}, status=HTTPStatus.UNAUTHORIZED)
+            return
+        try:
+            with STORE_LOCK:
+                item, is_new = sighting_store.like(sighting_id, user_key)
+                if is_new and item.get("owner"):
+                    auth_store.add_stats(item["owner"], xp=XP_PER_LIKE, likes_received=1)
+        except LookupError:
             self.send_json({"error": "Fant ikke observasjonen."}, status=HTTPStatus.NOT_FOUND)
             return
-        self.send_json({"item": sighting_store.serialize(item, self.current_client_id())})
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"item": sighting_store.serialize(item, user_key)})
 
     def handle_register(self) -> None:
         if self.reject_if_rate_limited("register"):
@@ -568,6 +588,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
         if any(char not in allowed for char in username):
             return "Brukernavn kan bare inneholde bokstaver, tall, bindestrek og understrek."
+        if username.casefold() == "anonym":
+            return "Brukernavnet er reservert."
         if len(password) < 6:
             return "Passord må være minst 6 tegn."
         try:
@@ -614,13 +636,9 @@ class AppHandler(SimpleHTTPRequestHandler):
     def current_user(self) -> dict[str, str] | None:
         return auth_store.get_session_user(self.cookie_value(SESSION_COOKIE))
 
-    def current_client_id(self) -> str:
-        cached = getattr(self, "_client_cookie", None)
-        if cached:
-            return cached
-        token = self.cookie_value(CLIENT_COOKIE) or secrets.token_urlsafe(18)
-        self._client_cookie = token
-        return token
+    def current_user_key(self) -> str | None:
+        user = self.current_user()
+        return user["username"].casefold() if user else None
 
     def cookie_value(self, key: str) -> str | None:
         header = self.headers.get("Cookie", "")
@@ -651,13 +669,6 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_header(
                 "Set-Cookie",
                 f"{SESSION_COOKIE}={cookie_token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}",
-            )
-        client_cookie = self.current_client_id()
-        if self.cookie_value(CLIENT_COOKIE) != client_cookie:
-            max_age = 365 * 24 * 60 * 60
-            self.send_header(
-                "Set-Cookie",
-                f"{CLIENT_COOKIE}={client_cookie}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         if clear_cookie:
             self.send_header(
