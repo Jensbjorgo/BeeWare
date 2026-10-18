@@ -5,10 +5,30 @@ const map = L.map("map", {
 });
 map.setView([58.1467, 7.9956], 11);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+const mapStatus = document.querySelector("#mapStatus");
+let loadedTiles = 0;
+let failedTiles = 0;
+const tiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: "&copy; OpenStreetMap-bidragsytere",
-}).addTo(map);
+});
+tiles.on("loading", () => {
+  loadedTiles = 0;
+  failedTiles = 0;
+  mapStatus.textContent = "Laster kart …";
+  mapStatus.classList.remove("hidden");
+});
+tiles.on("tileload", () => { loadedTiles++; });
+tiles.on("tileerror", () => { failedTiles++; });
+tiles.on("load", () => {
+  if (failedTiles > 0 && loadedTiles === 0) {
+    mapStatus.textContent = "Kartbildene kunne ikke lastes fra OpenStreetMap. Sjekk internettilgang og eventuell innholdsblokkering.";
+    mapStatus.classList.remove("hidden");
+  } else {
+    mapStatus.classList.add("hidden");
+  }
+});
+tiles.addTo(map);
 
 const state = {
   selectedLatLng: null,
