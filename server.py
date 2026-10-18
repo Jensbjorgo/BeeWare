@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import heapq
 import json
 import math
+import os
 import secrets
-from collections import defaultdict
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -23,19 +27,27 @@ SIGHTINGS_FILE = STORAGE_DIR / "sightings.json"
 USERS_FILE = STORAGE_DIR / "users.json"
 SESSIONS_FILE = STORAGE_DIR / "sessions.json"
 
-BUCKET_SIZE = 0.01
-DEFAULT_CENTER = {"lat": 58.1467, "lon": 7.9956}
 SIGHTING_TTL_HOURS = 3
 MAX_SIGHTINGS = 500
 STOP_SEARCH_LIMIT = 12
 ROUTE_SEARCH_LIMIT = 12
 NEARBY_STOP_LIMIT = 6
+NEARBY_RADIUS_KM = 2.0
 EARTH_RADIUS_KM = 6371.0
 SESSION_COOKIE = "beeware_session"
-CLIENT_COOKIE = "beeware_client"
 SESSION_TTL_DAYS = 14
 PBKDF2_ITERATIONS = 120_000
 XP_PER_LIKE = 10
+MAX_BODY_BYTES = 4096
+REQUEST_TIMEOUT_SECONDS = 10
+MAX_CONNECTIONS = 64
+STOP_NAME_MAX = 80
+ROUTE_MAX = 40
+NOTE_MAX = 160
+STOP_ID_MAX = 64
+# (requests, seconds) per client IP. Three reports per ten minutes means one
+# client cannot push all active reports out of the 500-report store.
+RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
 
 
 def utc_now() -> datetime:
@@ -66,10 +78,43 @@ def compact_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
+def clean_text(value: Any, limit: int) -> str:
+    text = compact_whitespace(str(value or ""))[:limit]
+    text.encode("utf-8")  # Raises UnicodeEncodeError (a ValueError) for lone surrogates.
+    return text
+
+
+def parse_coordinate(value: Any, limit: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError("not a number")
+    try:
+        number = float(value)
+    except OverflowError as exc:  # A huge JSON integer is not a ValueError.
+        raise ValueError("out of range") from exc
+    if not math.isfinite(number) or abs(number) > limit:
+        raise ValueError("out of range")
+    return number
+
+
+# ponytail: one lock for all JSON stores in one process; move to SQLite if it outgrows that.
+STORE_LOCK = threading.RLock()
+
+
+def read_json(path: Path) -> Any:
+    # A broken file raises instead of being treated as empty and overwritten.
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: Any) -> None:
+    raw = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    temp = path.with_suffix(".tmp")
+    temp.write_bytes(raw)
+    os.replace(temp, path)
+
+
 class TransitData:
     def __init__(self, data_dir: Path) -> None:
         self.stops_by_id: dict[str, dict[str, Any]] = {}
-        self.stop_buckets: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
         self.route_index: list[dict[str, str]] = []
         if (data_dir / "stops.txt").is_file():
             self._load_stops(data_dir / "stops.txt")
@@ -95,7 +140,6 @@ class TransitData:
                     "description": compact_whitespace(row.get("stop_desc") or ""),
                 }
                 self.stops_by_id[stop["id"]] = stop
-                self.stop_buckets[self._bucket_key(lat, lon)].append(stop)
 
     def _load_routes(self, path: Path) -> None:
         seen: set[tuple[str, str]] = set()
@@ -117,9 +161,6 @@ class TransitData:
                     }
                 )
         self.route_index.sort(key=lambda item: item["short_name"])
-
-    def _bucket_key(self, lat: float, lon: float) -> tuple[int, int]:
-        return (round(lat / BUCKET_SIZE), round(lon / BUCKET_SIZE))
 
     def search_stops(self, query: str, limit: int = STOP_SEARCH_LIMIT) -> list[dict[str, Any]]:
         needle = compact_whitespace(query).casefold()
@@ -158,28 +199,14 @@ class TransitData:
     def find_nearby_stops(
         self, lat: float, lon: float, limit: int = NEARBY_STOP_LIMIT
     ) -> list[dict[str, Any]]:
-        base_bucket = self._bucket_key(lat, lon)
-        candidates: list[tuple[float, dict[str, Any]]] = []
-        for lat_offset in range(-2, 3):
-            for lon_offset in range(-2, 3):
-                bucket = (
-                    base_bucket[0] + lat_offset,
-                    base_bucket[1] + lon_offset,
-                )
-                for stop in self.stop_buckets.get(bucket, []):
-                    distance_km = haversine_km(lat, lon, stop["lat"], stop["lon"])
-                    candidates.append((distance_km, stop))
-
-        candidates.sort(key=lambda item: item[0])
-        nearby = []
-        for distance_km, stop in candidates[:limit]:
-            nearby.append(
-                {
-                    **stop,
-                    "distance_m": int(distance_km * 1000),
-                }
-            )
-        return nearby
+        # ponytail: scans every stop; add a spatial index if a national feed makes this slow.
+        distances = ((haversine_km(lat, lon, stop["lat"], stop["lon"]), stop) for stop in self.stops_by_id.values())
+        nearest = heapq.nsmallest(limit, distances, key=lambda item: item[0])
+        return [
+            {**stop, "distance_m": int(distance_km * 1000)}
+            for distance_km, stop in nearest
+            if distance_km <= NEARBY_RADIUS_KM
+        ]
 
 
 class SightingStore:
@@ -189,67 +216,49 @@ class SightingStore:
         if not self.path.exists():
             self.path.write_text("[]\n", encoding="utf-8")
 
-    def _read_all(self) -> list[dict[str, Any]]:
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-
-    def _write_all(self, payload: list[dict[str, Any]]) -> None:
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     def _active_items(self) -> list[dict[str, Any]]:
         cutoff = utc_now() - timedelta(hours=SIGHTING_TTL_HOURS)
-        sightings = self._read_all()
+        sightings = read_json(self.path)
         active = [item for item in sightings if parse_iso8601(item["created_at"]) >= cutoff]
         active.sort(key=lambda item: item["created_at"], reverse=True)
         return active[:MAX_SIGHTINGS]
 
-    def serialize(self, item: dict[str, Any], client_id: str | None = None) -> dict[str, Any]:
+    def serialize(self, item: dict[str, Any], user_key: str | None = None) -> dict[str, Any]:
         liked_by = item.get("liked_by") or []
+        public = {key: value for key, value in item.items() if key not in ("liked_by", "owner")}
         return {
-            **item,
+            **public,
             "likes_count": len(liked_by),
-            "liked_by_me": bool(client_id and client_id in liked_by),
+            "liked_by_me": bool(user_key and user_key in liked_by),
         }
 
-    def list_recent(self, client_id: str | None = None) -> list[dict[str, Any]]:
-        return [self.serialize(item, client_id) for item in self._active_items()]
+    def list_recent(self, user_key: str | None = None) -> list[dict[str, Any]]:
+        with STORE_LOCK:
+            items = self._active_items()
+        return [self.serialize(item, user_key) for item in items]
 
     def add(self, payload: dict[str, Any]) -> dict[str, Any]:
-        sightings = self._active_items()
-        sightings.insert(0, payload)
-        self._write_all(sightings[:MAX_SIGHTINGS])
+        with STORE_LOCK:
+            sightings = self._active_items()
+            sightings.insert(0, payload)
+            write_json(self.path, sightings[:MAX_SIGHTINGS])
         return payload
 
-    def like(self, sighting_id: str, client_id: str) -> dict[str, Any] | None:
-        sightings = self._active_items()
-        updated_item = None
-        for item in sightings:
-            if item.get("id") != sighting_id:
-                continue
+    def like(self, sighting_id: str, user_key: str) -> tuple[dict[str, Any], bool]:
+        """Returns the sighting and whether this like is new."""
+        with STORE_LOCK:
+            sightings = self._active_items()
+            item = next((item for item in sightings if item.get("id") == sighting_id), None)
+            if item is None:
+                raise LookupError(sighting_id)
+            if item.get("owner") == user_key:
+                raise ValueError("Du kan ikke bekrefte din egen observasjon.")
             liked_by = item.setdefault("liked_by", [])
-            if client_id not in liked_by:
-                liked_by.append(client_id)
-            updated_item = item
-            break
-        if updated_item is None:
-            return None
-        self._write_all(sightings[:MAX_SIGHTINGS])
-        return updated_item
-
-    def stats_for_user(self, username: str) -> dict[str, int]:
-        sightings = self._read_all()
-        likes_received = sum(len(item.get("liked_by") or []) for item in sightings if item.get("reporter") == username)
-        sightings_count = sum(1 for item in sightings if item.get("reporter") == username)
-        xp = likes_received * XP_PER_LIKE
-        level = max(1, int(math.sqrt(xp / XP_PER_LIKE)) + 1 if xp else 1)
-        return {
-            "xp": xp,
-            "level": level,
-            "likes_received": likes_received,
-            "sightings_count": sightings_count,
-        }
+            if user_key in liked_by:
+                return item, False
+            liked_by.append(user_key)
+            write_json(self.path, sightings)
+        return item, True
 
 
 class AuthStore:
@@ -261,16 +270,6 @@ class AuthStore:
             if not path.exists():
                 path.write_text("{}\n", encoding="utf-8")
 
-    def _read_json(self, path: Path) -> dict[str, Any]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     def _hash_password(self, password: str, salt_hex: str) -> str:
         digest = hashlib.pbkdf2_hmac(
             "sha256",
@@ -281,23 +280,24 @@ class AuthStore:
         return digest.hex()
 
     def create_user(self, username: str, password: str) -> dict[str, str]:
-        users = self._read_json(self.users_path)
-        key = username.casefold()
-        if key in users:
-            raise ValueError("Brukernavnet er allerede i bruk.")
-
         salt = secrets.token_hex(16)
-        users[key] = {
-            "username": username,
-            "salt": salt,
-            "password_hash": self._hash_password(password, salt),
-            "created_at": utc_now().isoformat(),
-        }
-        self._write_json(self.users_path, users)
+        password_hash = self._hash_password(password, salt)
+        key = username.casefold()
+        with STORE_LOCK:
+            users = read_json(self.users_path)
+            if key in users:
+                raise ValueError("Brukernavnet er allerede i bruk.")
+            users[key] = {
+                "username": username,
+                "salt": salt,
+                "password_hash": password_hash,
+                "created_at": utc_now().isoformat(),
+            }
+            write_json(self.users_path, users)
         return {"username": username}
 
     def authenticate(self, username: str, password: str) -> dict[str, str] | None:
-        users = self._read_json(self.users_path)
+        users = read_json(self.users_path)
         user = users.get(username.casefold())
         if not user:
             return None
@@ -306,45 +306,77 @@ class AuthStore:
             return None
         return {"username": user["username"]}
 
-    def create_session(self, username: str) -> str:
-        sessions = self._read_json(self.sessions_path)
-        token = secrets.token_urlsafe(24)
-        sessions[token] = {
-            "username": username,
-            "expires_at": (utc_now() + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
+    def add_stats(self, user_key: str, **increments: int) -> None:
+        with STORE_LOCK:
+            users = read_json(self.users_path)
+            user = users.get(user_key)
+            if user is None:
+                return
+            for field, amount in increments.items():
+                user[field] = user.get(field, 0) + amount
+            write_json(self.users_path, users)
+
+    def stats(self, username: str) -> dict[str, int]:
+        user = read_json(self.users_path).get(username.casefold(), {})
+        xp = user.get("xp", 0)
+        return {
+            "xp": xp,
+            "level": int(math.sqrt(xp / XP_PER_LIKE)) + 1,
+            "likes_received": user.get("likes_received", 0),
+            "sightings_count": user.get("sightings_count", 0),
         }
-        self._write_json(self.sessions_path, sessions)
+
+    def create_session(self, username: str) -> str:
+        token = secrets.token_urlsafe(24)
+        now = utc_now()
+        with STORE_LOCK:
+            sessions = {
+                key: value
+                for key, value in read_json(self.sessions_path).items()
+                if parse_iso8601(value["expires_at"]) >= now
+            }
+            sessions[token] = {
+                "username": username,
+                "expires_at": (now + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
+            }
+            write_json(self.sessions_path, sessions)
         return token
 
     def get_session_user(self, token: str | None) -> dict[str, str] | None:
         if not token:
             return None
 
-        sessions = self._read_json(self.sessions_path)
-        session = sessions.get(token)
-        if not session:
-            return None
-        if parse_iso8601(session["expires_at"]) < utc_now():
-            sessions.pop(token, None)
-            self._write_json(self.sessions_path, sessions)
-            return None
+        with STORE_LOCK:
+            sessions = read_json(self.sessions_path)
+            session = sessions.get(token)
+            if not session:
+                return None
+            if parse_iso8601(session["expires_at"]) < utc_now():
+                sessions.pop(token, None)
+                write_json(self.sessions_path, sessions)
+                return None
         return {"username": session["username"]}
 
     def delete_session(self, token: str | None) -> None:
         if not token:
             return
-        sessions = self._read_json(self.sessions_path)
-        if token in sessions:
-            sessions.pop(token, None)
-            self._write_json(self.sessions_path, sessions)
+        with STORE_LOCK:
+            sessions = read_json(self.sessions_path)
+            if token in sessions:
+                sessions.pop(token, None)
+                write_json(self.sessions_path, sessions)
 
 
 transit_data = TransitData(DATA_DIR)
 sighting_store = SightingStore(SIGHTINGS_FILE)
 auth_store = AuthStore(USERS_FILE, SESSIONS_FILE)
+# ponytail: in-memory and per client IP; resets on restart.
+recent_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
 class AppHandler(SimpleHTTPRequestHandler):
+    timeout = REQUEST_TIMEOUT_SECONDS
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
@@ -359,6 +391,10 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self.send_json({"error": "Forespørselen kommer fra en annen side."}, status=HTTPStatus.FORBIDDEN)
+            return
         if parsed.path == "/api/sightings":
             self.handle_api_post_sighting()
             return
@@ -382,22 +418,17 @@ class AppHandler(SimpleHTTPRequestHandler):
     def handle_api_get(self, parsed: Any) -> None:
         params = parse_qs(parsed.query)
         if parsed.path == "/api/config":
-            self.send_json(
-                {
-                    "center": DEFAULT_CENTER,
-                    "ttl_hours": SIGHTING_TTL_HOURS,
-                }
-            )
+            self.send_json({"ttl_hours": SIGHTING_TTL_HOURS})
             return
 
         if parsed.path == "/api/me":
             user = self.current_user()
-            stats = sighting_store.stats_for_user(user["username"]) if user else None
+            stats = auth_store.stats(user["username"]) if user else None
             self.send_json({"user": user, "stats": stats})
             return
 
         if parsed.path == "/api/sightings":
-            self.send_json({"items": sighting_store.list_recent(self.current_client_id())})
+            self.send_json({"items": sighting_store.list_recent(self.current_user_key())})
             return
 
         if parsed.path == "/api/stops/search":
@@ -406,10 +437,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/stops/nearby":
-            lat = self._get_float(params, "lat")
-            lon = self._get_float(params, "lon")
-            if lat is None or lon is None:
-                self.send_json({"error": "lat and lon are required"}, status=HTTPStatus.BAD_REQUEST)
+            try:
+                lat = parse_coordinate(params.get("lat", [None])[0], 90)
+                lon = parse_coordinate(params.get("lon", [None])[0], 180)
+            except (TypeError, ValueError):
+                self.send_json({"error": "lat and lon must be valid coordinates"}, status=HTTPStatus.BAD_REQUEST)
                 return
             self.send_json({"items": transit_data.find_nearby_stops(lat, lon)})
             return
@@ -422,40 +454,46 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json({"error": "Unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
 
     def handle_api_post_sighting(self) -> None:
+        if self.reject_if_rate_limited("sighting"):
+            return
         user = self.current_user()
         data = self.read_json_body()
         if data is None:
             return
 
         try:
-            lat = float(data["lat"])
-            lon = float(data["lon"])
-        except (KeyError, TypeError, ValueError):
-            self.send_json({"error": "lat and lon must be numbers"}, status=HTTPStatus.BAD_REQUEST)
+            lat = parse_coordinate(data.get("lat"), 90)
+            lon = parse_coordinate(data.get("lon"), 180)
+            stop_name = clean_text(data.get("stop_name"), STOP_NAME_MAX)
+            route = clean_text(data.get("route"), ROUTE_MAX)
+            note = clean_text(data.get("note"), NOTE_MAX)
+            stop_id = clean_text(data.get("stop_id"), STOP_ID_MAX)
+        except (TypeError, ValueError):
+            self.send_json({"error": "Ugyldig posisjon eller tekst."}, status=HTTPStatus.BAD_REQUEST)
             return
-
-        stop_name = compact_whitespace(str(data.get("stop_name") or ""))
-        route = compact_whitespace(str(data.get("route") or ""))
-        note = compact_whitespace(str(data.get("note") or ""))
 
         nearby = transit_data.find_nearby_stops(lat, lon, limit=1)
         nearest = nearby[0] if nearby else None
 
+        owner = user["username"].casefold() if user else None
         payload = {
-            "id": f"sighting-{int(utc_now().timestamp() * 1000)}",
+            "id": secrets.token_hex(16),
             "lat": lat,
             "lon": lon,
             "route": route,
-            "note": note[:160],
-            "reporter": user["username"][:40] if user else "Anonym",
+            "note": note,
+            "reporter": user["username"] if user else "Anonym",
+            "owner": owner,
             "created_at": utc_now().isoformat(),
-            "stop_id": data.get("stop_id") or (nearest["id"] if nearest else ""),
+            "stop_id": stop_id or (nearest["id"] if nearest else ""),
             "stop_name": stop_name or (nearest["name"] if nearest else "Ukjent sted"),
             "distance_to_stop_m": nearest["distance_m"] if nearest else None,
             "liked_by": [],
         }
         sighting_store.add(payload)
-        self.send_json(sighting_store.serialize(payload, self.current_client_id()), status=HTTPStatus.CREATED)
+        if owner:
+            auth_store.add_stats(owner, sightings_count=1)
+        self.send_json(sighting_store.serialize(payload, owner), status=HTTPStatus.CREATED)
 
     def handle_like_sighting(self, path: str) -> None:
         prefix = "/api/sightings/"
@@ -464,13 +502,26 @@ class AppHandler(SimpleHTTPRequestHandler):
         if not sighting_id:
             self.send_json({"error": "Ugyldig observasjon."}, status=HTTPStatus.BAD_REQUEST)
             return
-        item = sighting_store.like(sighting_id, self.current_client_id())
-        if item is None:
+        user_key = self.current_user_key()
+        if not user_key:
+            self.send_json({"error": "Logg inn for å bekrefte observasjoner."}, status=HTTPStatus.UNAUTHORIZED)
+            return
+        try:
+            with STORE_LOCK:
+                item, is_new = sighting_store.like(sighting_id, user_key)
+                if is_new and item.get("owner"):
+                    auth_store.add_stats(item["owner"], xp=XP_PER_LIKE, likes_received=1)
+        except LookupError:
             self.send_json({"error": "Fant ikke observasjonen."}, status=HTTPStatus.NOT_FOUND)
             return
-        self.send_json({"item": sighting_store.serialize(item, self.current_client_id())})
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"item": sighting_store.serialize(item, user_key)})
 
     def handle_register(self) -> None:
+        if self.reject_if_rate_limited("register"):
+            return
         data = self.read_json_body()
         if data is None:
             return
@@ -489,6 +540,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json({"user": user}, status=HTTPStatus.CREATED, cookie_token=token)
 
     def handle_login(self) -> None:
+        if self.reject_if_rate_limited("login"):
+            return
         data = self.read_json_body()
         if data is None:
             return
@@ -513,16 +566,44 @@ class AppHandler(SimpleHTTPRequestHandler):
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
         if any(char not in allowed for char in username):
             return "Brukernavn kan bare inneholde bokstaver, tall, bindestrek og understrek."
+        if username.casefold() == "anonym":
+            return "Brukernavnet er reservert."
         if len(password) < 6:
             return "Passord må være minst 6 tegn."
+        try:
+            password.encode("utf-8")
+        except UnicodeEncodeError:
+            return "Passordet inneholder ugyldige tegn."
         return None
 
+    def reject_if_rate_limited(self, action: str) -> bool:
+        limit, window = RATE_LIMITS[action]
+        now = time.monotonic()
+        with STORE_LOCK:
+            hits = recent_requests[(action, self.client_ip())]
+            while hits and hits[0] <= now - window:
+                hits.popleft()
+            if len(hits) < limit:
+                hits.append(now)
+                return False
+        self.send_json({"error": "For mange forsøk. Vent litt og prøv igjen."}, status=HTTPStatus.TOO_MANY_REQUESTS)
+        return True
+
     def read_json_body(self) -> dict[str, Any] | None:
-        content_length = int(self.headers.get("Content-Length", "0"))
+        if self.headers.get_content_type() != "application/json":
+            self.send_json({"error": "Content-Type must be application/json"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            return None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = -1
+        if not 0 <= content_length <= MAX_BODY_BYTES:
+            self.send_json({"error": "Invalid or too large body"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return None
         body = self.rfile.read(content_length)
         try:
             data = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             self.send_json({"error": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
             return None
         if not isinstance(data, dict):
@@ -530,16 +611,18 @@ class AppHandler(SimpleHTTPRequestHandler):
             return None
         return data
 
+    def client_ip(self) -> str:
+        # The server only listens on 127.0.0.1, so outside clients come through a reverse
+        # proxy, and the last X-Forwarded-For entry is the address that proxy saw.
+        forwarded = self.headers.get("X-Forwarded-For")
+        return forwarded.split(",")[-1].strip() if forwarded else self.client_address[0]
+
     def current_user(self) -> dict[str, str] | None:
         return auth_store.get_session_user(self.cookie_value(SESSION_COOKIE))
 
-    def current_client_id(self) -> str:
-        cached = getattr(self, "_client_cookie", None)
-        if cached:
-            return cached
-        token = self.cookie_value(CLIENT_COOKIE) or secrets.token_urlsafe(18)
-        self._client_cookie = token
-        return token
+    def current_user_key(self) -> str | None:
+        user = self.current_user()
+        return user["username"].casefold() if user else None
 
     def cookie_value(self, key: str) -> str | None:
         header = self.headers.get("Cookie", "")
@@ -552,15 +635,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return value
         return None
 
-    def _get_float(self, params: dict[str, list[str]], key: str) -> float | None:
-        raw = params.get(key, [None])[0]
-        if raw is None:
-            return None
-        try:
-            return float(raw)
-        except ValueError:
-            return None
-
     def send_json(
         self,
         payload: dict[str, Any],
@@ -569,6 +643,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         clear_cookie: bool = False,
     ) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
@@ -577,28 +652,37 @@ class AppHandler(SimpleHTTPRequestHandler):
             max_age = SESSION_TTL_DAYS * 24 * 60 * 60
             self.send_header(
                 "Set-Cookie",
-                f"{SESSION_COOKIE}={cookie_token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax",
-            )
-        client_cookie = self.current_client_id()
-        if self.cookie_value(CLIENT_COOKIE) != client_cookie:
-            max_age = 365 * 24 * 60 * 60
-            self.send_header(
-                "Set-Cookie",
-                f"{CLIENT_COOKIE}={client_cookie}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax",
+                f"{SESSION_COOKIE}={cookie_token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         if clear_cookie:
             self.send_header(
                 "Set-Cookie",
-                f"{SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+                f"{SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         self.end_headers()
         self.wfile.write(raw)
 
 
+class AppServer(ThreadingHTTPServer):
+    connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self.connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.connection_slots.release()
+
+
 def run() -> None:
     host = "127.0.0.1"
     port = 8080
-    server = ThreadingHTTPServer((host, port), AppHandler)
+    server = AppServer((host, port), AppHandler)
     print(f"Serving BeeWare on http://{host}:{port}")
     server.serve_forever()
 

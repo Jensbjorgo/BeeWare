@@ -7,10 +7,10 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Viser et kart med nylige observasjoner.
 - Lar brukeren trykke i kartet eller bruke egen posisjon for å registrere en observasjon.
 - Viser egen posisjon som egen blå markør i kartet.
-- Henter nærmeste holdeplass fra GTFS-dataene i `data/stops.txt`.
+- Henter nærmeste holdeplass innen 2 km fra GTFS-dataene i `data/stops.txt`.
 - Lar brukeren knytte observasjonen til busslinje fra `data/routes.txt`.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
-- Lar andre bekrefte observasjoner med likes.
+- Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
 - Deler observasjoner mellom brukere som åpner samme server.
 
 ## Kjør lokalt
@@ -32,9 +32,30 @@ holdeplass- og linjesøk gir ingen treff. Sted og linje kan skrives inn manuelt.
 ## Lagring
 
 Observasjoner lagres i `storage/sightings.json` og vises i 3 timer før de ryddes bort automatisk.
-Brukere lagres i `storage/users.json` og aktive sesjoner i `storage/sessions.json`.
-Nettleseren får også en lokal klient-cookie for å holde styr på likes per enhet/nettleser.
+Brukere, med XP og antall likes, lagres i `storage/users.json` og aktive sesjoner i `storage/sessions.json`.
+XP blir værende når observasjonen utløper.
 `storage/` opprettes automatisk og ignoreres av Git. Ikke del brukerdata eller sesjonsfiler.
+
+## Grenser
+
+- Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
+- Forespørsler kan være på maks 4 KB, og POST fra andre nettsteder avvises.
+- Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`, får cookiene `Secure`.
+  Bak en proxy telles hver klient etter siste adresse i `X-Forwarded-For`.
+
+## Før offentlig drift
+
+Dette må på plass før appen legges ut på nett:
+
+- **Reverse proxy med HTTPS (nginx eller Caddy) foran serveren.** Python-serveren tåler ikke
+  klienter som sender data svært sakte («slowloris»). De kan holde alle 64 forbindelsene
+  opptatt. Proxyen tar imot hele forespørselen før den sendes videre. HTTPS trengs også for
+  GPS på mobil og for `Secure`-cookies.
+- **Database (SQLite) i stedet for JSON-filer.** Lagringen bruker én lås i én prosess, så
+  serveren kan ikke kjøre i flere prosesser. Like og XP skrives i to filer, så en diskfeil
+  mellom skrivingene kan gi en like uten XP.
+- **Egne kartfliser eller en flisleverandør.** `tile.openstreetmap.org` tillater ikke
+  produksjonstrafikk.
 
 ## Teknisk
 
