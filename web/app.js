@@ -111,7 +111,10 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+let statusVersion = 0;
+
 function setStatus(message, type = "") {
+  statusVersion++;
   formStatus.textContent = message;
   formStatus.className = type ? `status ${type}` : "status";
 }
@@ -376,16 +379,19 @@ function startLocationTracking(selectLocation = false) {
 
   locateBtn.disabled = true;
   const selectionBefore = state.selectedLatLng;
+  // GPS can answer late; its messages must not replace a newer one, such as a failed publish.
+  const statusBefore = statusVersion;
+  const setGpsStatus = (message, type) => statusVersion === statusBefore && setStatus(message, type);
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
-      setStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
+      setGpsStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
       // A spot picked by hand while GPS was answering wins over the button press.
       handleLocationUpdate(position, true, selectLocation && state.selectedLatLng === selectionBefore);
     },
     () => {
       locateBtn.disabled = false;
-      setStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      setGpsStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
@@ -397,7 +403,7 @@ function startLocationTracking(selectLocation = false) {
     (position) => handleLocationUpdate(position, false),
     () => {
       if (!state.currentLocationMarker) {
-        setStatus("Lokasjonstjenester er blokkert eller utilgjengelige.", "error");
+        setGpsStatus("Lokasjonstjenester er blokkert eller utilgjengelige.", "error");
       }
     },
     { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 }
@@ -477,7 +483,12 @@ reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitButton = reportForm.querySelector("button[type='submit']");
   submitButton.disabled = true;
-  await stopSearch;
+  // Wait until no newer search has started meanwhile, then read the form in one go.
+  let pending;
+  do {
+    pending = stopSearch;
+    await pending;
+  } while (pending !== stopSearch);
   if (!state.selectedLatLng) {
     submitButton.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");

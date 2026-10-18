@@ -284,3 +284,37 @@ test("publishing waits for a pending stop search that moves the position", async
   await sent;
   assert.deepEqual([posted.lat, posted.lon, posted.stop_id], [60.39, 5.32, "BGO"]);
 });
+
+test("a late GPS answer keeps a newer message from the user's own action", async () => {
+  const app = await setup();
+  await app.element("#reportForm").submit({ preventDefault() {} });  // Fails: no position chosen yet.
+  const message = app.element("#formStatus").textContent;
+  assert.match(message, /Velg først/);
+  app.current(59, 9);  // The automatic GPS lookup from startup answers afterwards.
+  assert.equal(app.element("#formStatus").textContent, message);
+});
+
+test("publishing waits for a stop search started while it was already waiting", async () => {
+  const searches = [];
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return new Promise((resolve) => searches.push(resolve));
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  app.updateSelection(58, 8);
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  const stop = app.element("#stopInput");
+  stop.value = "Ber";
+  stop.input();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  stop.value = "Bergen";
+  stop.input();
+  searches[0](reply({ items: [] }));
+  await settle();
+  searches[1](reply({ items: [{ id: "BGO", name: "Bergen", lat: 60.39, lon: 5.32 }] }));
+  await sent;
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_name], [60.39, 5.32, "Bergen"]);
+});
