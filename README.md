@@ -54,8 +54,9 @@ Dette må på plass før appen legges ut på nett:
 
 - **Reverse proxy med HTTPS (nginx eller Caddy) foran serveren.** Python-serveren tåler ikke
   klienter som sender data svært sakte («slowloris»). De kan holde alle 64 forbindelsene
-  opptatt. Proxyen tar imot hele forespørselen før den sendes videre. HTTPS trengs også for
-  GPS på mobil og for `Secure`-cookies.
+  opptatt. Proxyen må ta imot hele forespørselen før den sendes videre. nginx gjør det som
+  standard (`proxy_request_buffering on`); i Caddy må `request_buffers 4KiB` settes under
+  `reverse_proxy`. HTTPS trengs også for GPS på mobil og for `Secure`-cookies.
 - **Egne kartfliser eller en flisleverandør.** `tile.openstreetmap.org` gis uten garanti
   for oppetid, og tung bruk kan blokkeres uten varsel
   ([brukspolicy](https://operations.osmfoundation.org/policies/tiles/)). Ved bytte må

@@ -398,7 +398,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.dispatch(self.route_post)
 
     def do_HEAD(self) -> None:  # noqa: N802
-        self.dispatch(lambda parsed: super(AppHandler, self).do_HEAD())
+        self.dispatch(self.route_get)  # send_json and send_head leave out the body for HEAD.
 
     def send_head(self) -> Any:
         try:
@@ -432,7 +432,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/":
             self.path = "/index.html"
-        super().do_GET()
+        if self.command == "HEAD":
+            super().do_HEAD()
+        else:
+            super().do_GET()
 
     def end_headers(self) -> None:
         # Every response, static files and errors included, refuses framing and MIME sniffing.
@@ -718,15 +721,19 @@ class AppServer(ThreadingHTTPServer):
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self.connection_slots.acquire(blocking=False):
-            with suppress(OSError):
-                request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            self.shutdown_request(request)
+            self.refuse(request)
             return
         try:
             super().process_request(request, client_address)
-        except BaseException:  # The worker thread never started, so it cannot free its slot.
+        except Exception:  # The worker thread never started, so it cannot free its slot.
             self.connection_slots.release()
-            raise
+            self.handle_error(request, client_address)
+            self.refuse(request)
+
+    def refuse(self, request: Any) -> None:
+        with suppress(OSError):
+            request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        self.shutdown_request(request)
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:

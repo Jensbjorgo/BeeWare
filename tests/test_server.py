@@ -259,12 +259,10 @@ assert server.haversine_km(58.059, 8, -58.059, -172) > 20000  # Nearly opposite 
 httpd.connection_slots = threading.BoundedSemaphore(1)
 start = threading.Thread.start
 threading.Thread.start = lambda self: 1 / 0
-try:
-    request("GET", "/api/config")
-except (http.client.HTTPException, OSError):
-    pass
+assert request("GET", "/api/config")[0] == 503
 threading.Thread.start = start
 assert request("GET", "/api/config")[0] == 200
+assert request("HEAD", "/api/config")[:2] == (200, None)
 
 # A full server says so instead of hanging up.
 httpd.connection_slots = threading.BoundedSemaphore(1)
