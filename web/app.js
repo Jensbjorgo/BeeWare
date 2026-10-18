@@ -640,10 +640,12 @@ async function searchStop() {
     if (exact.length === 1) {
       selectStop(exact[0]);
     }
+    // With stops found but none picked, publishing asks for one; a name with no stop found is kept as typed.
+    return choices.length && exact.length !== 1 ? "unpicked" : "ok";
   } catch (error) {
     stopSuggestions.show([]);
     nearestStop.textContent = error.message;
-    return false; // Publishing stops rather than send this name with a position it may not belong to.
+    return "failed"; // Publishing stops rather than send this name with a position it may not belong to.
   }
 }
 
@@ -691,14 +693,19 @@ reportForm.addEventListener("submit", async (event) => {
   // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
   const failuresBefore = gpsButtonFailures;
   let waits;
-  let searchFound;
+  let search;
   do {
     waits = [stopSearch, gpsWait];
-    [searchFound] = await Promise.all(waits);
+    [search] = await Promise.all(waits);
   } while (waits[0] !== stopSearch || waits[1] !== gpsWait);
-  if (searchFound === false) {
+  const searchProblem = search === "failed"
+    ? "Holdeplassøket feilet, så observasjonen ble ikke sendt. Prøv igjen, eller velg et sted i kartet."
+    : search === "unpicked" && !stopInput.dataset.stopId
+      ? "Velg holdeplassen i forslagslisten, eller velg et sted i kartet."
+      : "";
+  if (searchProblem) {
     submitButton.disabled = false;
-    setStatus("Holdeplassøket feilet, så observasjonen ble ikke sendt. Prøv igjen, eller velg et sted i kartet.", "error");
+    setStatus(searchProblem, "error");
     return;
   }
   if (gpsButtonFailures !== failuresBefore) {

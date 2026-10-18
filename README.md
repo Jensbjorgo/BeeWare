@@ -12,7 +12,9 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Søker holdeplasser med eksakte navn først og deretter de nærmeste treffene.
 - Søker linjer med nummer, navn og operatør (for eksempel «31 Ruter»). Observasjonen får nummer og
   operatør («31 · Ruter»), eller hele linjenavnet når operatøren har flere linjer med samme nummer.
-- Viser alle treff i en egen forslagsliste som kan brukes med piltaster, Enter og Escape.
+- Viser alle treff i en egen forslagsliste som kan brukes med piltaster, Enter og Escape. Gir
+  holdeplassøket treff, må ett av dem velges før publisering; uten treff lagres navnet slik det er
+  skrevet, på rapportposisjonen.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
 - Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
 - Deler observasjoner mellom brukere som åpner samme server.

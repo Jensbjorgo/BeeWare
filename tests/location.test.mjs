@@ -633,6 +633,33 @@ test("a failed stop search stops publishing until the user searches again or pic
   assert.equal(posted.lat, 63.4168);
 });
 
+test("a stop name with several matches must be picked before publishing", async () => {
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return reply({ items: [
+      { id: "TSB", name: "Trondheim S", mode: "buss", lat: 63.4361, lon: 10.4011, distance_m: 2100 },
+      { id: "TST", name: "Trondheim S", mode: "tog", lat: 63.4365, lon: 10.4005, distance_m: 2150 },
+    ] });
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  app.updateSelection(63.4168, 10.4076);  // Gløshaugen, picked on the map.
+  const stop = app.element("#stopInput");
+  stop.value = "Trondheim S";
+  stop.input();
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.equal(posted, undefined);  // Would store "Trondheim S" at Gløshaugen.
+  assert.match(app.element("#formStatus").textContent, /Velg holdeplassen/);
+  stop.keydown({ key: "ArrowDown", preventDefault() {} });
+  stop.keydown({ key: "ArrowDown", preventDefault() {} });
+  stop.keydown({ key: "Enter", preventDefault() {} });
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.deepEqual([posted.stop_id, posted.lat], ["TST", 63.4365]);
+});
+
 test("typing a stop drops a GPS stop lookup still waiting its turn", async () => {
   const lookups = [];
   const app = await setup((url) => {
