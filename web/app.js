@@ -385,9 +385,14 @@ function renderFeed(items) {
           <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
           <div class="feed-actions">
             <span class="tiny">${item.distance_to_stop_m != null ? `${formatDistance(item.distance_to_stop_m)} fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
-            <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
-              ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
-            </button>
+            <div class="feed-buttons">
+              <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
+                ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
+              </button>
+              ${item.mine
+                ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}">Slett</button>`
+                : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}">Rapporter</button>`}
+            </div>
           </div>
         </article>
       `
@@ -694,17 +699,36 @@ routeInput.addEventListener("input", async () => {
   }
 });
 
+// Likes, reports and deletes are idempotent on the server, so the buttons stay enabled.
+const feedActions = {
+  likeId: { action: "like" },
+  reportId: {
+    action: "report",
+    question: "Rapportere observasjonen som feil eller upassende? Den skjules for deg nå, og for alle etter tre rapporter.",
+    done: "Observasjonen er rapportert og skjult for deg.",
+  },
+  deleteId: { action: "delete", question: "Slette observasjonen din?", done: "Observasjonen er slettet." },
+};
+
 feed.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-like-id]");
+  const button = event.target.closest("[data-like-id], [data-report-id], [data-delete-id]");
   if (!button) {
     return;
   }
-  // A like is idempotent on the server, so the button stays enabled and keeps keyboard focus.
+  const key = Object.keys(feedActions).find((name) => button.dataset[name]);
+  const { action, question, done } = feedActions[key];
+  // Logged out, the server's answer asks the user to log in, so there is nothing to confirm.
+  if (question && state.user && !confirm(question)) {
+    return;
+  }
   try {
-    await fetchJson(`/api/sightings/${encodeURIComponent(button.dataset.likeId)}/like`, { method: "POST" });
+    await fetchJson(`/api/sightings/${encodeURIComponent(button.dataset[key])}/${action}`, { method: "POST" });
   } catch (error) {
     setStatus(error.message, "error");
     return;
+  }
+  if (done) {
+    setStatus(done, "ok");
   }
   refresh().catch(showLoadError);
 });

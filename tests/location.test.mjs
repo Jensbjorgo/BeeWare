@@ -66,10 +66,11 @@ async function setup(route = () => undefined) {
     AbortController,
     setInterval(callback) { intervals++; poll = callback; },
     setTimeout(callback) { timeouts.add(callback); return callback; },
+    confirm: () => true,
     clearTimeout(callback) { timeouts.delete(callback); },
   });
   const app = vm.runInContext(
-    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser, loadSightings, sightingMarkers, tiles }; })()`, context,
+    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser, loadSightings, sightingMarkers, tiles, refresh }; })()`, context,
   );
   await settle();
   return {
@@ -786,4 +787,30 @@ test("failed map tiles show a message and a later successful load clears it", as
   app.tiles.events.tileload();
   app.tiles.events.load();
   assert.equal(status.textContent, "");  // Some images arrived, so the map works.
+});
+
+test("owners can delete their sighting and logged-in users can report others", async () => {
+  const posts = [];
+  const items = [
+    { id: "own", lat: 58, lon: 8, created_at: new Date().toISOString(), likes_count: 0, mine: true },
+    { id: "other", lat: 58, lon: 8, created_at: new Date().toISOString(), likes_count: 0, mine: false },
+  ];
+  const app = await setup((url, options) => {
+    if (options?.method === "POST") {
+      posts.push(url);
+      return reply({ ok: true });
+    }
+    if (url === "/api/me") return reply({ user: { username: "bob" }, stats: { xp: 0, likes_received: 0, sightings_count: 0 } });
+    if (url === "/api/sightings") return reply({ items });
+  });
+  await app.refresh();
+  const feed = app.element("#feed");
+  assert.match(feed.innerHTML, /data-delete-id="own"/);
+  assert.match(feed.innerHTML, /data-report-id="other"/);
+  assert.doesNotMatch(feed.innerHTML, /data-report-id="own"|data-delete-id="other"/);
+  const click = (dataset) => feed.click({ target: { closest: () => ({ dataset }) } });
+  await click({ reportId: "other" });
+  await click({ deleteId: "own" });
+  assert.deepEqual(posts, ["/api/sightings/other/report", "/api/sightings/own/delete"]);
+  assert.equal(app.element("#formStatus").textContent, "Observasjonen er slettet.");
 });

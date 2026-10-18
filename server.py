@@ -50,6 +50,7 @@ SESSION_COOKIE = "beeware_session"
 SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 120_000
 XP_PER_LIKE = 10
+HIDE_AFTER_REPORTS = 3  # A sighting reported by this many accounts is hidden for everyone.
 MAX_BODY_BYTES = 4096
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_CONNECTIONS = 64
@@ -59,6 +60,7 @@ NOTE_MAX = 160
 STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
 # client cannot push all active reports out of the 500-report store.
+SIGHTING_ACTIONS = {"like": "bekrefte", "report": "rapportere", "delete": "slette"}  # action -> verb in messages
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
 # Only the map tiles come from elsewhere (Kartverket); Leaflet is served from web/vendor.
 CONTENT_SECURITY_POLICY = (
@@ -330,12 +332,21 @@ CREATE TABLE IF NOT EXISTS likes (
     user_key TEXT NOT NULL REFERENCES users(key) ON DELETE CASCADE,
     PRIMARY KEY (sighting_id, user_key)
 );
+CREATE TABLE IF NOT EXISTS reports (
+    sighting_id TEXT NOT NULL REFERENCES sightings(id) ON DELETE CASCADE,
+    user_key TEXT NOT NULL REFERENCES users(key) ON DELETE CASCADE,
+    PRIMARY KEY (sighting_id, user_key)
+);
 """
 
+# Visible sightings: not expired, not reported by this user and not hidden by reports.
 SIGHTINGS_QUERY = """
-SELECT s.*, COUNT(l.user_key) AS likes_count, COALESCE(MAX(l.user_key = :user_key), 0) AS liked_by_me
+SELECT s.*, COUNT(l.user_key) AS likes_count, COALESCE(MAX(l.user_key = :user_key), 0) AS liked_by_me,
+    COALESCE(s.owner = :user_key, 0) AS mine
 FROM sightings s LEFT JOIN likes l ON l.sighting_id = s.id
 WHERE s.created_at >= :cutoff AND (:id IS NULL OR s.id = :id)
+    AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.sighting_id = s.id AND r.user_key = :user_key)
+    AND (SELECT COUNT(*) FROM reports r WHERE r.sighting_id = s.id) < :hide_after
 GROUP BY s.id
 ORDER BY s.created_at DESC
 LIMIT :limit
@@ -355,6 +366,7 @@ def public_sighting(row: Any) -> dict[str, Any]:
     del item["owner"]
     item["created_at"] = datetime.fromtimestamp(item["created_at"], timezone.utc).isoformat()
     item["liked_by_me"] = bool(item["liked_by_me"])
+    item["mine"] = bool(item["mine"])
     return item
 
 
@@ -390,7 +402,10 @@ class Store:
     def _sightings(self, db: sqlite3.Connection, user_key: str | None, sighting_id: str | None = None) -> list[dict[str, Any]]:
         rows = db.execute(
             SIGHTINGS_QUERY,
-            {"user_key": user_key, "cutoff": sighting_cutoff(), "id": sighting_id, "limit": MAX_SIGHTINGS},
+            {
+                "user_key": user_key, "cutoff": sighting_cutoff(), "id": sighting_id,
+                "hide_after": HIDE_AFTER_REPORTS, "limit": MAX_SIGHTINGS,
+            },
         )
         return [public_sighting(row) for row in rows]
 
@@ -413,20 +428,35 @@ class Store:
     def like_sighting(self, sighting_id: str, user_key: str) -> dict[str, Any]:
         """Records one like per account and gives the owner XP in the same transaction."""
         with self._write() as db:
-            row = db.execute(
-                "SELECT owner FROM sightings WHERE id = ? AND created_at >= ?", (sighting_id, sighting_cutoff())
-            ).fetchone()
-            if row is None:
-                raise LookupError(sighting_id)
-            if row["owner"] == user_key:
+            owner = self._visible_owner(db, sighting_id, user_key)
+            if owner == user_key:
                 raise ValueError("Du kan ikke bekrefte din egen observasjon.")
             added = db.execute("INSERT OR IGNORE INTO likes VALUES (?, ?)", (sighting_id, user_key)).rowcount
-            if added and row["owner"]:
+            if added and owner:
                 db.execute(
                     "UPDATE users SET xp = xp + ?, likes_received = likes_received + 1 WHERE key = ?",
-                    (XP_PER_LIKE, row["owner"]),
+                    (XP_PER_LIKE, owner),
                 )
             return self._sightings(db, user_key, sighting_id)[0]
+
+    def report_sighting(self, sighting_id: str, user_key: str) -> None:
+        """Hides the sighting for this user at once, and for everyone once HIDE_AFTER_REPORTS accounts report it."""
+        with self._write() as db:
+            if self._visible_owner(db, sighting_id, user_key) == user_key:
+                raise ValueError("Du kan slette din egen observasjon i stedet.")
+            db.execute("INSERT OR IGNORE INTO reports VALUES (?, ?)", (sighting_id, user_key))
+
+    def delete_sighting(self, sighting_id: str, user_key: str) -> None:
+        """Deletes the user's own sighting with its likes and reports; XP already given stays."""
+        with self._write() as db:
+            if not db.execute("DELETE FROM sightings WHERE id = ? AND owner = ?", (sighting_id, user_key)).rowcount:
+                raise LookupError(sighting_id)
+
+    def _visible_owner(self, db: sqlite3.Connection, sighting_id: str, user_key: str) -> str | None:
+        """The owner of a sighting this user can see; expired, deleted or hidden ones raise LookupError."""
+        if not self._sightings(db, user_key, sighting_id):
+            raise LookupError(sighting_id)
+        return db.execute("SELECT owner FROM sightings WHERE id = ?", (sighting_id,)).fetchone()["owner"]
 
     def create_user(self, username: str, password: str) -> str:
         """Creates the account and its first session in one transaction and returns the session token."""
@@ -567,8 +597,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/sightings":
             self.handle_api_post_sighting()
             return
-        if parsed.path.startswith("/api/sightings/") and parsed.path.endswith("/like"):
-            self.handle_like_sighting(parsed.path)
+        parts = parsed.path.split("/")  # "/api/sightings/<id>/like" -> ["", "api", "sightings", id, "like"]
+        if len(parts) == 5 and parts[:3] == ["", "api", "sightings"] and parts[4] in SIGHTING_ACTIONS:
+            self.handle_sighting_action(parts[3], parts[4])
             return
         if parsed.path == "/api/auth/register":
             self.handle_register()
@@ -667,28 +698,30 @@ class AppHandler(SimpleHTTPRequestHandler):
             "distance_to_stop_m": nearest["distance_m"] if nearest else None,
         }
         store.add_sighting(sighting)
-        self.send_json(public_sighting({**sighting, "likes_count": 0, "liked_by_me": 0}), status=HTTPStatus.CREATED)
+        self.send_json(
+            public_sighting({**sighting, "likes_count": 0, "liked_by_me": 0, "mine": bool(owner)}),
+            status=HTTPStatus.CREATED,
+        )
 
-    def handle_like_sighting(self, path: str) -> None:
-        prefix = "/api/sightings/"
-        suffix = "/like"
-        sighting_id = path[len(prefix) : -len(suffix)]
+    def handle_sighting_action(self, sighting_id: str, action: str) -> None:
         if not sighting_id:
             self.send_json({"error": "Ugyldig observasjon."}, status=HTTPStatus.BAD_REQUEST)
             return
         user_key = self.current_user_key()
         if not user_key:
-            self.send_json({"error": "Logg inn for å bekrefte observasjoner."}, status=HTTPStatus.UNAUTHORIZED)
+            verb = SIGHTING_ACTIONS[action]
+            self.send_json({"error": f"Logg inn for å {verb} observasjoner."}, status=HTTPStatus.UNAUTHORIZED)
             return
+        act = {"like": store.like_sighting, "report": store.report_sighting, "delete": store.delete_sighting}[action]
         try:
-            item = store.like_sighting(sighting_id, user_key)
+            item = act(sighting_id, user_key)
         except LookupError:
             self.send_json({"error": "Fant ikke observasjonen."}, status=HTTPStatus.NOT_FOUND)
             return
         except ValueError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
-        self.send_json({"item": item})
+        self.send_json({"item": item} if item else {"ok": True})
 
     def handle_register(self) -> None:
         if self.reject_if_rate_limited("register"):

@@ -18,6 +18,8 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
   skrevet, på rapportposisjonen.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
 - Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
+- Lar eieren slette sin egen observasjon. Innloggede kan rapportere andres: en rapport skjuler
+  observasjonen for den som rapporterer, og tre rapporter fra ulike kontoer skjuler den for alle.
 - Deler observasjoner mellom brukere som åpner samme server.
 
 ## Kjør lokalt
@@ -65,7 +67,7 @@ Entur-dataene har heller ingen holdeplasser der.
 ## Lagring
 
 Alt lagres i SQLite-databasen `storage/beeware.db`: brukere med XP og antall likes, sesjoner,
-observasjoner og likes. Observasjoner vises i 3 timer, mens XP blir værende. Utløpte observasjoner
+observasjoner, likes og rapporter. Observasjoner vises i 3 timer, mens XP blir værende. Utløpte observasjoner
 slettes når neste observasjon sendes inn, og utløpte sesjoner ved neste innlogging. En like og XP-en
 den gir, lagres i samme transaksjon, og det samme gjelder en ny bruker og første innlogging.
 `storage/` opprettes automatisk og ignoreres av Git. Ikke del databasen; den inneholder brukerdata.

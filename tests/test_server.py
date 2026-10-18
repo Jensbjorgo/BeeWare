@@ -312,6 +312,36 @@ stats = request("GET", "/api/me", headers=alice)[1]["stats"]
 assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 3}, stats
 """)
 
+    def test_owners_delete_and_three_reports_hide_a_sighting(self):
+        run_in_copy(self, """
+users = {name: session(request("POST", "/api/auth/register", {"username": name, "password": "secret1"})[2])
+         for name in ("alice", "bob", "carol")}
+users["dave"] = session(request("POST", "/api/auth/register", {"username": "dave", "password": "secret1"}, {"X-Forwarded-For": "10.0.0.2"})[2])
+created = request("POST", "/api/sightings", {"lat": 58, "lon": 8}, users["alice"])[1]
+spam, own = created["id"], created["mine"]
+assert own and not request("GET", "/api/sightings", headers=users["bob"])[1]["items"][0]["mine"]
+def visible(name=None):
+    return [item["id"] for item in request("GET", "/api/sightings", headers=users.get(name))[1]["items"]]
+assert request("POST", f"/api/sightings/{spam}/report")[0] == 401
+assert request("POST", f"/api/sightings/{spam}/report", headers=users["alice"])[0] == 400  # She can delete it.
+assert request("POST", f"/api/sightings/{spam}/report", headers=users["bob"])[1] == {"ok": True}
+assert (visible("bob"), visible("carol"), visible()) == ([], [spam], [spam])  # Hidden for bob at once.
+assert request("POST", f"/api/sightings/{spam}/like", headers=users["bob"])[0] == 404
+assert request("POST", f"/api/sightings/{spam}/report", headers=users["bob"])[0] == 404
+request("POST", f"/api/sightings/{spam}/report", headers=users["carol"])
+assert visible() == [spam]
+request("POST", f"/api/sightings/{spam}/report", headers=users["dave"])
+assert visible() == visible("alice") == []  # Three accounts: hidden for everyone.
+kept = request("POST", "/api/sightings", {"lat": 58, "lon": 8}, users["alice"])[1]["id"]
+request("POST", f"/api/sightings/{kept}/like", headers=users["bob"])
+assert request("POST", f"/api/sightings/{kept}/delete")[0] == 401
+assert request("POST", f"/api/sightings/{kept}/delete", headers=users["bob"])[0] == 404  # Not his.
+assert request("POST", f"/api/sightings/{kept}/delete", headers=users["alice"])[1] == {"ok": True}
+assert visible() == [] and sql("SELECT COUNT(*) FROM likes")[0][0] == 0
+assert request("GET", "/api/me", headers=users["alice"])[1]["stats"]["xp"] == 10  # XP given stays.
+assert request("POST", "/api/sightings//delete", headers=users["alice"])[0] == 400
+""")
+
     def test_nearest_stop_is_the_closest_one_and_names_match_ids(self):
         run_in_copy(self, """
 data = server.transit_data
