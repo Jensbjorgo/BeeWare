@@ -512,6 +512,57 @@ test("a refresh holds the poll until both requests are done, even when one fails
   assert.equal(sightings.length, 2);
 });
 
+test("a fully typed name picks its stop whatever the case", async () => {
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? reply({ items: [{ id: "GLO", name: "Gløshaugen", lat: 63.418, lon: 10.404 }] }) : undefined);
+  const stop = app.element("#stopInput");
+  stop.value = "gløshaugen";
+  await stop.input();
+  assert.deepEqual([stop.dataset.stopId, app.state.selectedLatLng.lat], ["GLO", 63.418]);
+});
+
+test("publishing waits for the GPS button unless the user picks a spot meanwhile", async () => {
+  const posted = [];
+  const app = await setup((url, options) => {
+    if (options?.method === "POST") {
+      posted.push(JSON.parse(options.body));
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#stopInput", "#routeInput", "#noteInput"]) app.element(id).value = "";
+  app.updateSelection(63.418, 10.404);
+  app.click();
+  let sent = app.element("#reportForm").submit({ preventDefault() {} });
+  await settle();
+  assert.equal(posted.length, 0);  // Still waiting for the position.
+  app.current(63.436, 10.401);
+  await sent;
+  assert.equal(posted[0].lat, 63.436);
+  app.click();
+  sent = app.element("#reportForm").submit({ preventDefault() {} });
+  app.updateSelection(58, 8);  // A spot picked by hand ends the wait.
+  await sent;
+  assert.equal(posted[1].lat, 58);
+});
+
+test("typing a stop drops a GPS stop lookup still waiting its turn", async () => {
+  const lookups = [];
+  const app = await setup((url) => {
+    if (url.startsWith("/api/stops/nearby")) return new Promise((resolve) => lookups.push(resolve));
+    if (url.startsWith("/api/stops/search")) return reply({ items: [{ id: "PG", name: "Prinsens gate", lat: 63.43, lon: 10.39 }] });
+  });
+  app.watch(63.43, 10.40);  // A lookup is running ...
+  app.click();
+  app.current(63.436, 10.401);  // ... so the button's lookup waits its turn.
+  const stop = app.element("#stopInput");
+  stop.value = "Prinsen";
+  await stop.input();
+  lookups[0](reply({ items: [{ id: "TS", name: "Trondheim S", distance_m: 5 }] }));
+  await settle();
+  assert.equal(lookups.length, 1);
+  assert.equal(stop.value, "Prinsen");
+});
+
 test("the first GPS fix leaves a stop search the user already started alone", async () => {
   let answerSearch;
   let posted;

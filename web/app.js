@@ -289,8 +289,7 @@ function updateSelection(lat, lon, fromGps = false) {
   state.selectedLatLng = { lat, lon };
   state.selectionFollowsGps = fromGps;
   if (!fromGps) {
-    state.manualChanges++;
-    gpsFix = null; // A queued GPS stop lookup no longer applies.
+    userChoseManually();
   }
   selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
@@ -516,6 +515,17 @@ function selectStop({ stop, label }) {
 // with the newest fix, instead of each fix aborting the last.
 let gpsFix = null;
 let gpsLookup = null;
+// Publishing waits for the GPS button's answer, unless the user picks a spot or types a stop meanwhile.
+let gpsWait = Promise.resolve();
+let releaseGpsWait = () => {};
+
+// A spot the user picks or a stop they type wins over GPS answers and lookups still pending.
+function userChoseManually() {
+  state.manualChanges++;
+  gpsFix = null;
+  releaseGpsWait();
+}
+
 function lookUpStopForGps(lat, lon, fromButton) {
   gpsFix = { lat, lon, fromButton: fromButton || Boolean(gpsFix?.fromButton) };
   gpsLookup ??= (async () => {
@@ -552,16 +562,23 @@ function startLocationTracking(selectLocation = false) {
   locateBtn.disabled = true;
   const changesBefore = state.manualChanges;
   const setGpsStatus = lateStatus();
+  let release = () => {};
+  if (selectLocation) {
+    gpsWait = new Promise((resolve) => (release = resolve));
+    releaseGpsWait = release;
+  }
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
       setGpsStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
       // A spot picked or a stop typed by hand while GPS was answering wins over the button press.
       handleLocationUpdate(position, true, selectLocation && state.manualChanges === changesBefore);
+      release();
     },
     () => {
       locateBtn.disabled = false;
       setGpsStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      release();
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
@@ -592,7 +609,7 @@ stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 
 async function searchStop() {
   const query = stopInput.value.trim();
-  state.manualChanges++;
+  userChoseManually();
   stopInput.dataset.stopId = "";
   stopInput.dataset.fromGps = "false";
   stopSuggestions.typed();
@@ -605,10 +622,10 @@ async function searchStop() {
     }
     const choices = stopChoices(payload.items);
     stopSuggestions.show(choices);
-    // A fully typed name picks its stop when no other stop in the list shares it.
-    const exact = choices.find((choice) => choice.label === query);
-    if (exact) {
-      selectStop(exact);
+    // A fully typed name, in any case, picks its stop when no other stop in the list shares it.
+    const exact = choices.filter((choice) => choice.label.toLowerCase() === query.toLowerCase());
+    if (exact.length === 1) {
+      selectStop(exact[0]);
     }
   } catch (error) {
     stopSuggestions.show([]);
@@ -657,12 +674,14 @@ reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitButton = reportForm.querySelector("button[type='submit']");
   submitButton.disabled = true;
-  // Wait until no newer search has started meanwhile, then read the form in one go.
-  let pending;
+  // Wait for the latest stop search and GPS button press, then for a GPS stop lookup still running,
+  // and read the form in one go.
+  let waits;
   do {
-    pending = stopSearch;
-    await pending;
-  } while (pending !== stopSearch);
+    waits = [stopSearch, gpsWait];
+    await Promise.all(waits);
+  } while (waits[0] !== stopSearch || waits[1] !== gpsWait);
+  await gpsLookup;
   if (!state.selectedLatLng) {
     submitButton.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
