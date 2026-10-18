@@ -38,6 +38,7 @@ def run_in_copy(test, code, data=None):
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory)
         shutil.copy(ROOT / "server.py", target / "server.py")
+        shutil.copytree(ROOT / "web", target / "web")
         (target / "data").mkdir()
         for name, text in (data or {}).items():
             (target / "data" / name).write_text(text, encoding="utf-8")
@@ -63,7 +64,7 @@ token = auth.create_session('tester')
 assert auth.get_session_user(token) == {'username': 'tester'}
 auth.delete_session(token)
 assert auth.get_session_user(token) is None
-assert sql("SELECT * FROM sessions") == []
+assert sql("SELECT * FROM sessions WHERE token = ?", token) == []
 """)
 
     def test_gtfs_search_and_nearest_stop(self):
@@ -103,6 +104,44 @@ threads = [threading.Thread(target=f, args=(i,)) for i in range(30) for f in (re
 assert len(server.store.list_sightings()) == 30
 assert len(registered) == 1, registered
 assert sum(bool(server.store.authenticate("same", f"password-{i}")) for i in range(30)) == 1
+
+# Other processes share the database file.
+child = "import server, time\\nfor i in range(20): server.store.add_sighting(%r | {'id': f'%s-{i}'})"
+fields = {"lat": 58, "lon": 8, "route": "", "note": "", "reporter": "Anonym", "owner": None,
+          "created_at": time.time(), "stop_id": "", "stop_name": "", "distance_to_stop_m": None}
+import subprocess, sys
+children = [subprocess.Popen([sys.executable, "-c", child % (fields, n)]) for n in range(3)]
+assert [c.wait() for c in children] == [0, 0, 0]
+assert len(server.store.list_sightings()) == 90
+
+# Ten accounts liking the same report at once, twice each, give exactly ten likes and 100 XP.
+for i in range(10):
+    sql("INSERT INTO users (key, username, salt, password_hash, created_at) VALUES (?, ?, '', '', 0)", f"u{i}", f"u{i}")
+sql("UPDATE sightings SET owner = 'same' WHERE id = '0'")
+likes = [threading.Thread(target=server.store.like_sighting, args=("0", f"u{i % 10}")) for i in range(20)]
+[t.start() for t in likes]
+[t.join() for t in likes]
+assert {s["id"]: s["likes_count"] for s in server.store.list_sightings()}["0"] == 10
+assert server.store.stats("same")["xp"] == 100
+
+# If giving XP fails, the like is rolled back with it.
+sql("CREATE TRIGGER no_xp BEFORE UPDATE OF xp ON users BEGIN SELECT RAISE(ABORT, 'no xp'); END")
+sql("UPDATE sightings SET owner = 'same' WHERE id = '1'")
+try:
+    server.store.like_sighting("1", "u0")
+    raise AssertionError("the XP update should fail")
+except server.sqlite3.IntegrityError:
+    pass
+assert sql("SELECT * FROM likes WHERE sighting_id = '1'") == []
+
+# If creating the first session fails, the new account is rolled back too.
+sql("CREATE TRIGGER no_sessions BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'no sessions'); END")
+try:
+    server.store.create_user("halfway", "secret1")
+    raise AssertionError("the session insert should fail")
+except server.sqlite3.IntegrityError:
+    pass
+assert sql("SELECT * FROM users WHERE key = 'halfway'") == []
 """)
 
     def test_bad_requests_are_rejected_without_losing_data(self):
@@ -167,9 +206,10 @@ assert item["likes_count"] == 1 and item["liked_by_me"] and "liked_by" not in it
 assert all("liked_by" not in item for item in request("GET", "/api/sightings")[1]["items"])
 sql("UPDATE sightings SET created_at = 0")  # Both reports expire ...
 assert request("POST", f"/api/sightings/{second}/like", headers=bob)[0] == 404
-sql("DELETE FROM sightings")  # ... and are cleaned away; the XP must stay.
+third = request("POST", "/api/sightings", {"lat": 58, "lon": 8}, alice)[1]["id"]
+assert [row["id"] for row in sql("SELECT id FROM sightings")] == [third]  # ... and the next report deletes them; the XP stays.
 stats = request("GET", "/api/me", headers=alice)[1]["stats"]
-assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 2}, stats
+assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 3}, stats
 """)
 
     def test_nearest_stop_is_the_closest_one_and_names_match_ids(self):
@@ -187,10 +227,51 @@ assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 586)
 
     def test_every_response_refuses_framing_and_sniffing(self):
         run_in_copy(self, """
-for path in ("/", "/api/config", "/missing.js"):
+for path, status in (("/", 200), ("/app.js", 200), ("/api/config", 200), ("/missing.js", 404)):
     connection = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1])
     connection.request("GET", path)
-    headers = connection.getresponse().headers
-    assert "frame-ancestors 'none'" in headers["Content-Security-Policy"], path
-    assert headers["X-Frame-Options"] == "DENY" and headers["X-Content-Type-Options"] == "nosniff", path
+    response = connection.getresponse()
+    assert response.status == status, (path, response.status)
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"], path
+    assert response.headers["X-Frame-Options"] == "DENY", path
+    assert response.headers["X-Content-Type-Options"] == "nosniff", path
+""")
+
+    def test_every_failure_still_gets_an_http_answer(self):
+        run_in_copy(self, """
+import socket
+def raw(data):
+    client = socket.create_connection(("127.0.0.1", httpd.server_address[1]))
+    client.sendall(data)
+    return client.recv(64)
+assert raw(b"GET http://[ HTTP/1.0\\r\\n\\r\\n").startswith(b"HTTP/1.0 400")
+def locked(*args):
+    raise server.sqlite3.OperationalError("database is locked")
+server.store.add_sighting = locked
+assert request("POST", "/api/sightings", {"lat": 58, "lon": 8})[0] == 503
+server.store.list_sightings = lambda *args: 1 / 0
+assert request("GET", "/api/sightings")[0] == 500
+assert server.haversine_km(58.059, 8, -58.059, -172) > 20000  # Nearly opposite points must not crash.
+
+# A worker thread that cannot start gives its connection slot back.
+httpd.connection_slots = threading.BoundedSemaphore(1)
+start = threading.Thread.start
+threading.Thread.start = lambda self: 1 / 0
+try:
+    request("GET", "/api/config")
+except (http.client.HTTPException, OSError):
+    pass
+threading.Thread.start = start
+assert request("GET", "/api/config")[0] == 200
+
+# A full server says so instead of hanging up.
+httpd.connection_slots = threading.BoundedSemaphore(1)
+httpd.connection_slots.acquire()
+assert request("GET", "/api/config")[0] == 503
+
+# A body that never arrives gets 408 once the socket timeout runs out.
+httpd.connection_slots.release()
+server.AppHandler.timeout = 0.2
+body_missing = b"POST /api/auth/login HTTP/1.0\\r\\nContent-Type: application/json\\r\\nContent-Length: 10\\r\\n\\r\\n"
+assert raw(body_missing).startswith(b"HTTP/1.0 408")
 """)

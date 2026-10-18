@@ -12,7 +12,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -50,8 +50,9 @@ STOP_ID_MAX = 64
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
 # Leaflet comes from unpkg and the map tiles from OpenStreetMap; nothing else is loaded.
 CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; "
-    "img-src 'self' data: https://tile.openstreetmap.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    "default-src 'self'; script-src 'self' https://unpkg.com/leaflet@1.9.4/;"
+    " style-src 'self' https://unpkg.com/leaflet@1.9.4/;"
+    " img-src 'self' data: https://tile.openstreetmap.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 
 
@@ -67,8 +68,8 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         math.sin(dlat / 2) ** 2
         + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
     )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return EARTH_RADIUS_KM * c
+    # min(): rounding can push `a` just above 1 for nearly opposite points.
+    return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(min(1.0, a)))
 
 
 def compact_whitespace(value: str) -> str:
@@ -320,18 +321,19 @@ class Store:
                 )
             return self._sightings(db, user_key, sighting_id)[0]
 
-    def create_user(self, username: str, password: str) -> dict[str, str]:
+    def create_user(self, username: str, password: str) -> str:
+        """Creates the account and its first session in one transaction and returns the session token."""
         salt = secrets.token_hex(16)
         password_hash = hash_password(password, salt)  # Slow on purpose, so keep it outside the write lock.
-        try:
-            with self._write() as db:
+        with self._write() as db:
+            try:
                 db.execute(
                     "INSERT INTO users (key, username, salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
                     (username.casefold(), username, salt, password_hash, time.time()),
                 )
-        except sqlite3.IntegrityError:
-            raise ValueError("Brukernavnet er allerede i bruk.") from None
-        return {"username": username}
+            except sqlite3.IntegrityError:
+                raise ValueError("Brukernavnet er allerede i bruk.") from None
+            return self._new_session(db, username)
 
     def authenticate(self, username: str, password: str) -> dict[str, str] | None:
         with self._read() as db:
@@ -348,13 +350,16 @@ class Store:
         stats = dict(user) if user else {"xp": 0, "likes_received": 0, "sightings_count": 0}
         return {**stats, "level": int(math.sqrt(stats["xp"] / XP_PER_LIKE)) + 1}
 
-    def create_session(self, username: str) -> str:
+    def _new_session(self, db: sqlite3.Connection, username: str) -> str:
         token = secrets.token_urlsafe(24)
         now = time.time()
-        with self._write() as db:
-            db.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
-            db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (token, username.casefold(), now + SESSION_TTL_SECONDS))
+        db.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+        db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (token, username.casefold(), now + SESSION_TTL_SECONDS))
         return token
+
+    def create_session(self, username: str) -> str:
+        with self._write() as db:
+            return self._new_session(db, username)
 
     def get_session_user(self, token: str | None) -> dict[str, str] | None:
         if not token:
@@ -387,7 +392,31 @@ class AppHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
+        self.dispatch(self.route_get)
+
+    def do_POST(self) -> None:  # noqa: N802
+        self.dispatch(self.route_post)
+
+    def dispatch(self, route: Any) -> None:
+        """Gives every request an answer, also when the URL, the body read or the database fails."""
+        try:
+            parsed = urlparse(self.path)
+        except ValueError:  # A request target such as "http://[".
+            self.send_json({"error": "Ugyldig adresse."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            route(parsed)
+        except sqlite3.OperationalError:  # Still locked after the 10 s busy wait, or disk trouble.
+            self.send_json({"error": "Serveren er opptatt. Prøv igjen."}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+        except TimeoutError:  # The client sent its body too slowly.
+            self.send_json({"error": "Forespørselen tok for lang tid."}, status=HTTPStatus.REQUEST_TIMEOUT)
+        except ConnectionError:
+            raise  # The client is gone, so there is no one to answer.
+        except Exception:
+            self.server.handle_error(self.request, self.client_address)  # Prints the traceback.
+            self.send_json({"error": "Noe gikk galt på serveren."}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def route_get(self, parsed: Any) -> None:
         if parsed.path.startswith("/api/"):
             self.handle_api_get(parsed)
             return
@@ -402,8 +431,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
-    def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
+    def route_post(self, parsed: Any) -> None:
         origin = self.headers.get("Origin")
         try:
             foreign = bool(origin) and urlparse(origin).netloc != self.headers.get("Host")
@@ -545,12 +573,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            user = store.create_user(username, password)
+            token = store.create_user(username, password)
         except ValueError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
-        token = store.create_session(user["username"])
-        self.send_json({"user": user}, status=HTTPStatus.CREATED, cookie_token=token)
+        self.send_json({"user": {"username": username}}, status=HTTPStatus.CREATED, cookie_token=token)
 
     def handle_login(self) -> None:
         if self.reject_if_rate_limited("login"):
@@ -680,9 +707,15 @@ class AppServer(ThreadingHTTPServer):
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self.connection_slots.acquire(blocking=False):
+            with suppress(OSError):
+                request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             self.shutdown_request(request)
             return
-        super().process_request(request, client_address)
+        try:
+            super().process_request(request, client_address)
+        except BaseException:  # The worker thread never started, so it cannot free its slot.
+            self.connection_slots.release()
+            raise
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
