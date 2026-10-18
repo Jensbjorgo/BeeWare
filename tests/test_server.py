@@ -87,22 +87,22 @@ assert data.find_nearby_stops(58.15, 8.0)[0]['distance_m'] == 0
 class RegressionTests(unittest.TestCase):
     def test_concurrent_writes_keep_every_report_and_user(self):
         run_in_copy(self, """
+from concurrent.futures import ThreadPoolExecutor
 def report(i):
     server.store.add_sighting({"id": str(i), "lat": 58, "lon": 8, "route": "", "note": "", "reporter": "Anonym",
                                "owner": None, "created_at": time.time(), "stop_id": "", "stop_name": "",
                                "distance_to_stop_m": None})
-registered = []
 def register(i):
     try:
         server.store.create_user("same", f"password-{i}")
-        registered.append(i)
+        return True
     except ValueError:
-        pass
-threads = [threading.Thread(target=f, args=(i,)) for i in range(30) for f in (report, register)]
-[t.start() for t in threads]
-[t.join() for t in threads]
+        return False
+# result() re-raises any error from a worker thread, so a crash cannot pass unnoticed.
+with ThreadPoolExecutor(60) as pool:
+    results = [job.result() for job in [pool.submit(f, i) for i in range(30) for f in (report, register)]]
 assert len(server.store.list_sightings()) == 30
-assert len(registered) == 1, registered
+assert results.count(True) == 1, results
 assert sum(bool(server.store.authenticate("same", f"password-{i}")) for i in range(30)) == 1
 
 # Other processes share the database file.
@@ -118,9 +118,8 @@ assert len(server.store.list_sightings()) == 90
 for i in range(10):
     sql("INSERT INTO users (key, username, salt, password_hash, created_at) VALUES (?, ?, '', '', 0)", f"u{i}", f"u{i}")
 sql("UPDATE sightings SET owner = 'same' WHERE id = '0'")
-likes = [threading.Thread(target=server.store.like_sighting, args=("0", f"u{i % 10}")) for i in range(20)]
-[t.start() for t in likes]
-[t.join() for t in likes]
+with ThreadPoolExecutor(20) as pool:
+    [job.result() for job in [pool.submit(server.store.like_sighting, "0", f"u{i % 10}") for i in range(20)]]
 assert {s["id"]: s["likes_count"] for s in server.store.list_sightings()}["0"] == 10
 assert server.store.stats("same")["xp"] == 100
 
@@ -245,6 +244,9 @@ def raw(data):
     client.sendall(data)
     return client.recv(64)
 assert raw(b"GET http://[ HTTP/1.0\\r\\n\\r\\n").startswith(b"HTTP/1.0 400")
+assert raw(b"GET /%00 HTTP/1.0\\r\\n\\r\\n").startswith(b"HTTP/1.0 404")
+assert raw(b"HEAD /%00 HTTP/1.0\\r\\n\\r\\n").startswith(b"HTTP/1.0 404")
+assert raw(b"HEAD / HTTP/1.0\\r\\n\\r\\n").startswith(b"HTTP/1.0 200")
 def locked(*args):
     raise server.sqlite3.OperationalError("database is locked")
 server.store.add_sighting = locked

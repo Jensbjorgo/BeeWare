@@ -397,6 +397,16 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self.dispatch(self.route_post)
 
+    def do_HEAD(self) -> None:  # noqa: N802
+        self.dispatch(lambda parsed: super(AppHandler, self).do_HEAD())
+
+    def send_head(self) -> Any:
+        try:
+            return super().send_head()
+        except ValueError:  # A path with a null byte, such as "/%00", names no file.
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return None
+
     def dispatch(self, route: Any) -> None:
         """Gives every request an answer, also when the URL, the body read or the database fails."""
         try:
@@ -699,7 +709,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 f"{SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         self.end_headers()
-        self.wfile.write(raw)
+        if self.command != "HEAD":
+            self.wfile.write(raw)
 
 
 class AppServer(ThreadingHTTPServer):

@@ -41,7 +41,7 @@ den gir, lagres i samme transaksjon, og det samme gjelder en ny bruker og først
 
 - Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
 - JSON-innhold kan være på maks 4 KB, og POST fra andre nettsteder avvises.
-- Alle svar har en Content-Security-Policy som bare slipper inn Leaflet 1.9.4 fra unpkg og fliser fra
+- Alle svar med innhold har en Content-Security-Policy som bare slipper inn Leaflet 1.9.4 fra unpkg og fliser fra
   OpenStreetMap, og siden kan ikke bygges inn i andre nettsteder.
 - Serveren lytter bare på `127.0.0.1`. Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`,
   får cookiene `Secure`. Hver klient telles etter siste adresse i `X-Forwarded-For`, så proxyen må
