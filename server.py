@@ -35,10 +35,13 @@ STOP_SEARCH_LIMIT = 12
 ROUTE_SEARCH_LIMIT = 20
 NEARBY_STOP_LIMIT = 6
 NEARBY_RADIUS_KM = 2.0
-# Entur has one station per mode (bus, tram, metro) with the same name, often metres apart;
-# search shows same-named stops this close as one.
-SAME_NAME_RADIUS_KM = 0.3
-EARTH_RADIUS_KM = 6371.0
+# WGS84, the datum of GTFS and GPS coordinates.
+WGS84_A_KM = 6378.137
+WGS84_F = 1 / 298.257223563
+# Entur marks each stop with the GTFS route type that serves it.
+VEHICLE_MODES = {
+    "0": "trikk", "1": "T-bane", "2": "tog", "3": "buss", "4": "båt", "5": "kabeltrikk", "6": "taubane", "7": "kabelbane",
+}
 SESSION_COOKIE = "beeware_session"
 SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 120_000
@@ -47,7 +50,7 @@ MAX_BODY_BYTES = 4096
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_CONNECTIONS = 64
 STOP_NAME_MAX = 80
-ROUTE_MAX = 40
+ROUTE_MAX = 80
 NOTE_MAX = 160
 STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
@@ -61,20 +64,30 @@ CONTENT_SECURITY_POLICY = (
 )
 
 
-def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    lat1_rad = math.radians(lat1)
-    lon1_rad = math.radians(lon1)
-    lat2_rad = math.radians(lat2)
-    lon2_rad = math.radians(lon2)
-    dlat = lat2_rad - lat1_rad
-    dlon = lon2_rad - lon1_rad
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance on the WGS84 ellipsoid (Andoyer-Lambert).
 
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
+    Within 2 cm of the exact geodesic up to 2 km and 13 m anywhere in Norway; a sphere is off
+    by up to 8 m and 5 km.
+    """
+    mid = math.radians((lat1 + lat2) / 2)
+    half_dlat = math.radians((lat1 - lat2) / 2)
+    half_dlon = math.radians((lon1 - lon2) / 2)
+    s = (math.sin(half_dlat) * math.cos(half_dlon)) ** 2 + (math.cos(mid) * math.sin(half_dlon)) ** 2
+    c = (math.cos(half_dlat) * math.cos(half_dlon)) ** 2 + (math.sin(mid) * math.sin(half_dlon)) ** 2
+    if s == 0:
+        return 0.0
+    if c < 1e-9:  # Nearly opposite points, where the formula breaks down.
+        return math.pi * WGS84_A_KM
+    omega = math.atan(math.sqrt(s / c))
+    r = math.sqrt(s * c) / omega
+    h1 = (3 * r - 1) / (2 * c)
+    h2 = (3 * r + 1) / (2 * s)
+    return 2 * omega * WGS84_A_KM * (
+        1
+        + WGS84_F * h1 * (math.sin(mid) * math.cos(half_dlat)) ** 2
+        - WGS84_F * h2 * (math.cos(mid) * math.sin(half_dlat)) ** 2
     )
-    # min(): rounding can push `a` just above 1 for nearly opposite points.
-    return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(min(1.0, a)))
 
 
 def compact_whitespace(value: str) -> str:
@@ -117,6 +130,7 @@ class TransitData:
         self.search_index: list[tuple[str, dict[str, Any]]] = []
         self.points: list[tuple[float, float, str]] = []  # (lat, lon, stop id), sorted by latitude.
         self.point_lats: list[float] = []
+        self.platforms: defaultdict[str, list[tuple[float, float]]] = defaultdict(list)  # stop id -> points
         self.route_index: list[dict[str, str]] = []
         self._load_stops(read_gtfs(data_dir / "stops.txt"))
         self._load_routes(read_gtfs(data_dir / "routes.txt"), read_gtfs(data_dir / "agency.txt"))
@@ -132,6 +146,7 @@ class TransitData:
                     "lon": parse_coordinate(row["stop_lon"], 180),
                     "platform": row.get("platform_code") or "",
                     "description": compact_whitespace(row.get("stop_desc") or ""),
+                    "mode": VEHICLE_MODES.get(row.get("vehicle_type") or "", ""),
                 }
             except (AttributeError, KeyError, TypeError, ValueError):
                 continue  # Missing columns, short rows and invalid coordinates are skipped.
@@ -146,6 +161,8 @@ class TransitData:
         self.points += [(s["lat"], s["lon"], s["id"]) for s in stations.values() if s["id"] not in measured]
         self.points.sort()
         self.point_lats = [point[0] for point in self.points]
+        for lat, lon, stop_id in self.points:
+            self.platforms[stop_id].append((lat, lon))
         self.search_index = [
             (f"{stop['name']} {stop['description']} {stop['platform']}".casefold(), stop)
             for stop in self.stops_by_id.values()
@@ -179,39 +196,41 @@ class TransitData:
         """Exact names first, then names with a word that starts with the query, then the rest.
 
         Within each group the stops closest to `near` come first, so "sentrum" finds the nearest town.
+        With `near`, a stop's position and distance are those of its platform closest to `near`.
         """
         needle = compact_whitespace(query).casefold()
-        if len(needle) < 2:
+        if not needle:
             return []
         word_start = re.compile(r"\b" + re.escape(needle))
         scored = []
         for haystack, stop in self.search_index:
-            if needle in haystack:
-                name = stop["name"].casefold()
-                quality = 0 if name == needle else 1 if word_start.search(name) else 2
-                distance = haversine_km(near[0], near[1], stop["lat"], stop["lon"]) if near else 0.0
-                scored.append((quality, distance, name, stop["id"], stop))
-        results: list[dict[str, Any]] = []
-        for _, distance, name, _, stop in sorted(scored):
-            if not any(
-                other["name"].casefold() == name
-                and haversine_km(other["lat"], other["lon"], stop["lat"], stop["lon"]) < SAME_NAME_RADIUS_KM
-                for other in results
-            ):
-                results.append({**stop, "distance_m": round(distance * 1000)} if near else stop)
-                if len(results) == limit:
-                    break
-        return results
+            if needle not in haystack:
+                continue
+            name = stop["name"].casefold()
+            if len(needle) == 1 and name != needle:
+                continue  # A single letter only finds the stop with exactly that name, such as Å in Lofoten.
+            quality = 0 if name == needle else 1 if word_start.search(name) else 2
+            distance = 0.0
+            if near:
+                distance, lat, lon = min(
+                    (distance_km(near[0], near[1], lat, lon), lat, lon) for lat, lon in self.platforms[stop["id"]]
+                )
+                stop = {**stop, "lat": lat, "lon": lon, "distance_m": round(distance * 1000)}
+            scored.append((quality, distance, name, stop["id"], stop))
+        return [item[-1] for item in heapq.nsmallest(limit, scored, key=lambda item: item[:4])]
 
     def search_routes(self, query: str, limit: int = ROUTE_SEARCH_LIMIT) -> list[dict[str, str]]:
-        """Line numbers that match exactly first, then those that start with the query."""
-        needle = compact_whitespace(query).casefold()
+        """Every word must match, as in "31 AtB". Line numbers equal to the first word come first,
+        then those that start with it."""
+        words = compact_whitespace(query).casefold().split()
+        if not words:
+            return []
 
         def rank(route: dict[str, str]) -> tuple[int, str]:
             short_name = route["short_name"].casefold()
-            return (0 if short_name == needle else 1 if short_name.startswith(needle) else 2, route["label"])
+            return (0 if short_name == words[0] else 1 if short_name.startswith(words[0]) else 2, route["label"])
 
-        matches = [route for route in self.route_index if needle in route["label"].casefold()]
+        matches = [route for route in self.route_index if all(word in route["label"].casefold() for word in words)]
         return heapq.nsmallest(limit, matches, key=rank)
 
     def find_nearby_stops(
@@ -219,14 +238,15 @@ class TransitData:
     ) -> list[dict[str, Any]]:
         # Only boarding points inside this latitude and longitude band can be within the radius.
         # ponytail: the band ignores the 180th meridian, which no Norwegian stop is near.
-        dlat = math.degrees(NEARBY_RADIUS_KM / EARTH_RADIUS_KM)
+        # A degree of latitude is shortest at the equator (radius a(1-f)²), so the band is never too narrow.
+        dlat = math.degrees(NEARBY_RADIUS_KM / (WGS84_A_KM * (1 - WGS84_F) ** 2))
         dlon = dlat / math.cos(math.radians(min(abs(lat) + dlat, 89.9)))
         first = bisect.bisect_left(self.point_lats, lat - dlat)
         last = bisect.bisect_right(self.point_lats, lat + dlat)
         nearest: dict[str, float] = {}
         for point_lat, point_lon, stop_id in self.points[first:last]:
             if abs(point_lon - lon) <= dlon:
-                distance = haversine_km(lat, lon, point_lat, point_lon)
+                distance = distance_km(lat, lon, point_lat, point_lon)
                 if distance <= NEARBY_RADIUS_KM and distance < nearest.get(stop_id, math.inf):
                     nearest[stop_id] = distance
         return [

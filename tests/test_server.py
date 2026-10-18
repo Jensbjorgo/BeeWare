@@ -86,18 +86,19 @@ assert data.find_nearby_stops(58.15, 8.0)[0]['distance_m'] == 0
 
     def test_national_feed_with_stations_platforms_and_agencies(self):
         # Entur's feed for all of Norway: stations (type 1) group their platforms (type 0).
-        stops = """stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,platform_code
-NSR:StopPlace:1,Jernbanetorget,59.9115,10.7500,1,,
-NSR:Quay:11,Jernbanetorget,59.9110,10.7510,0,NSR:StopPlace:1,A
-NSR:Quay:12,Jernbanetorget,59.9120,10.7490,0,NSR:StopPlace:1,B
-NSR:Entrance:9,Inngang,59.9111,10.7511,2,NSR:StopPlace:1,
-NSR:StopPlace:2,Sentrum,63.4305,10.3951,1,,
-NSR:Quay:21,Sentrum,63.4300,10.3950,0,NSR:StopPlace:2,
-NSR:StopPlace:3,Sentrum,59.9130,10.7400,1,,
-NSR:StopPlace:4,Sentrum,59.9131,10.7402,1,,
-NSR:StopPlace:5,Lørenskog sentrum,59.9270,10.9550,1,,
-NSR:StopPlace:6,Sentrumsgården,59.9135,10.7410,1,,
-NSR:StopPlace:7,Sentrum fergeleie,59.2000,10.4000,1,,
+        stops = """stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,platform_code,vehicle_type
+NSR:StopPlace:1,Jernbanetorget,59.9115,10.7500,1,,,1
+NSR:Quay:11,Jernbanetorget,59.9110,10.7510,0,NSR:StopPlace:1,A,1
+NSR:Quay:12,Jernbanetorget,59.9120,10.7490,0,NSR:StopPlace:1,B,1
+NSR:Entrance:9,Inngang,59.9111,10.7511,2,NSR:StopPlace:1,,
+NSR:StopPlace:2,Sentrum,63.4305,10.3951,1,,,3
+NSR:Quay:21,Sentrum,63.4300,10.3950,0,NSR:StopPlace:2,,3
+NSR:StopPlace:3,Sentrum,59.9130,10.7400,1,,,3
+NSR:StopPlace:4,Sentrum,59.9131,10.7402,1,,,0
+NSR:StopPlace:5,Lørenskog sentrum,59.9270,10.9550,1,,,3
+NSR:StopPlace:6,Sentrumsgården,59.9135,10.7410,1,,,3
+NSR:StopPlace:7,Sentrum fergeleie,59.2000,10.4000,1,,,4
+NSR:StopPlace:8,Å,68.7836,17.7842,1,,,3
 """
         routes = """route_id,agency_id,route_short_name,route_long_name
 RUT:Line:31,RUT,31,Tonsenhagen - Snaroya
@@ -107,25 +108,39 @@ RUT:Line:310,RUT,310,Ski - Oslo
         agencies = "agency_id,agency_name\nRUT,Ruter\nATB,AtB\n"
         run_in_copy(self, """
 data = server.transit_data
-assert sorted(data.stops_by_id) == [f"NSR:StopPlace:{i}" for i in range(1, 8)]
+assert sorted(data.stops_by_id) == [f"NSR:StopPlace:{i}" for i in range(1, 9)]
 assert [s["id"] for s in data.search_stops("jernbanetorget")] == ["NSR:StopPlace:1"]
 trondheim, oslo = (63.43, 10.39), (59.91, 10.75)
 # Exact names first, then names with a word starting "sentrum" by distance, then the rest.
-# The two Oslo stations named Sentrum, a few metres apart, show as one.
-assert [s["id"] for s in data.search_stops("sentrum", oslo)] == [
-    "NSR:StopPlace:4", "NSR:StopPlace:2", "NSR:StopPlace:6", "NSR:StopPlace:5", "NSR:StopPlace:7",
-], data.search_stops("sentrum", oslo)
-first, second = [s["id"] for s in data.search_stops("sentrum", trondheim)][:2]
-assert first == "NSR:StopPlace:2" and second in {"NSR:StopPlace:3", "NSR:StopPlace:4"}, (first, second)
+# The bus and tram stations named Sentrum, metres apart, are different stops and both show.
+found = data.search_stops("sentrum", oslo)
+assert [s["id"] for s in found] == [
+    "NSR:StopPlace:4", "NSR:StopPlace:3", "NSR:StopPlace:2", "NSR:StopPlace:6", "NSR:StopPlace:5", "NSR:StopPlace:7",
+], found
+assert [s["mode"] for s in found[:2]] == ["trikk", "buss"], found
+assert [s["id"] for s in data.search_stops("sentrum", trondheim)][:3] == [
+    "NSR:StopPlace:2", "NSR:StopPlace:4", "NSR:StopPlace:3",
+]
 assert "distance_m" not in data.search_stops("sentrum")[0]
+# With a position, a station is found at its platform closest to that position.
+near_b = data.search_stops("jernbanetorget", (59.9121, 10.7489))[0]
+assert (near_b["lat"], near_b["lon"], near_b["distance_m"]) == (59.9120, 10.7490, 12), near_b
+assert (data.search_stops("jernbanetorget")[0]["lat"], data.stops_by_id["NSR:StopPlace:1"]["lat"]) == (59.9115, 59.9115)
+# One letter finds only a stop with exactly that name.
+assert [s["id"] for s in data.search_stops("å")] == ["NSR:StopPlace:8"]
+assert data.search_stops("s") == []
 # Distances go to the nearest platform, not the station's centre or an entrance.
 nearest = data.find_nearby_stops(59.9110, 10.7510)
 assert [(s["id"], s["distance_m"]) for s in nearest[:1]] == [("NSR:StopPlace:1", 0)], nearest
 assert [s["id"] for s in data.find_nearby_stops(59.9130, 10.7400)][:1] == ["NSR:StopPlace:3"]
 labels = [r["label"] for r in data.search_routes("31")]
 assert labels == ["31 Lade - Tiller · AtB", "31 Tonsenhagen - Snaroya · Ruter", "310 Ski - Oslo · Ruter"], labels
+# Every word must match, so a line number and an operator narrow the list together.
+assert [r["label"] for r in data.search_routes("31 ruter")] == ["31 Tonsenhagen - Snaroya · Ruter", "310 Ski - Oslo · Ruter"]
+assert [r["label"] for r in data.search_routes("31 · AtB")] == ["31 Lade - Tiller · AtB"]
+assert data.search_routes(" ") == []
 items = request("GET", "/api/stops/search?q=sentrum&lat=63.43&lon=10.39")[1]["items"]
-assert items[0]["id"] == "NSR:StopPlace:2" and items[0]["distance_m"] == 260, items
+assert items[0]["id"] == "NSR:StopPlace:2" and items[0]["distance_m"] == 250, items  # To platform 21.
 assert request("GET", "/api/stops/search?q=sentrum&lat=nan&lon=10")[0] == 200
 """, data={"stops.txt": stops, "routes.txt": routes, "agency.txt": agencies})
 
@@ -265,9 +280,14 @@ assert [stop["id"] for stop in data.find_nearby_stops(58.15, 8.0, limit=1)] == [
 def report(**fields):
     item = request("POST", "/api/sightings", {"lat": 58.15, "lon": 8.0, **fields})[1]
     return item["stop_id"], item["stop_name"], item["distance_to_stop_m"]
-assert report() == ("east", "Ost", 587)
-assert report(stop_name="Mitt sted") == ("", "Mitt sted", 587)
-assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 587)
+# 588.854 m on the WGS84 ellipsoid (Vincenty); a sphere gives 587 m.
+assert report() == ("east", "Ost", 589)
+assert report(stop_name="Mitt sted") == ("", "Mitt sted", 589)
+assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 589)
+# Within centimetres of Vincenty's WGS84 distances: 1826.667 m at 71° N and 393.270 km from Oslo to Trondheim.
+assert abs(server.distance_km(71.1, 25.76, 71.11, 25.8) - 1.826667) < 0.00005
+assert abs(server.distance_km(59.911, 10.75, 63.4361, 10.4011) - 393.270) < 0.005
+assert server.distance_km(58.059, 8, -58.059, -172) > 19900  # Nearly opposite points must not crash.
 """, data={"stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nnorth,Nord,58.165,8.0\neast,Ost,58.15,8.01\nfar,Fjern,59.0,8.0\n"})
 
     def test_every_response_refuses_framing_and_sniffing(self):
@@ -299,7 +319,6 @@ server.store.add_sighting = locked
 assert request("POST", "/api/sightings", {"lat": 58, "lon": 8})[0] == 503
 server.store.list_sightings = lambda *args: 1 / 0
 assert request("GET", "/api/sightings")[0] == 500
-assert server.haversine_km(58.059, 8, -58.059, -172) > 20000  # Nearly opposite points must not crash.
 
 # A worker thread that cannot start gives its connection slot back.
 httpd.connection_slots = threading.BoundedSemaphore(1)

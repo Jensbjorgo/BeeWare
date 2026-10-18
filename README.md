@@ -7,9 +7,11 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Viser et kart med nylige observasjoner.
 - Lar brukeren trykke i kartet eller bruke egen posisjon for å registrere en observasjon.
 - Viser egen posisjon som egen blå markør i kartet.
-- Dekker hele Norge med Kartverkets topografiske kart og Enturs nasjonale holdeplass- og linjedata.
+- Dekker fastlands-Norge med Kartverkets topografiske kart og Enturs nasjonale holdeplass- og linjedata.
 - Henter nærmeste holdeplass innen 2 km, målt til nærmeste plattform.
-- Søker holdeplasser med de nærmeste treffene først, og linjer med operatør (for eksempel «31 · AtB»).
+- Søker holdeplasser med eksakte navn først og deretter de nærmeste treffene.
+- Søker linjer med nummer, navn og operatør (for eksempel «31 AtB»), og operatøren blir med i
+  observasjonen («31 · AtB»).
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
 - Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
 - Deler observasjoner mellom brukere som åpner samme server.
@@ -42,9 +44,15 @@ det når holdeplasser eller linjer er endret, og ikke oftere enn én gang i døg
 Uten filene fungerer kart og rapportering fortsatt, men holdeplass- og linjesøk gir ingen
 treff. Sted og linje kan da skrives inn manuelt.
 
-Entur har én holdeplass per stasjon med plattformer under. Søket viser stasjonene, mens
-avstander måles til nærmeste plattform. Like navn innen 300 meter (for eksempel buss- og
-trikkestopp med samme navn) vises som ett treff.
+Entur har én stasjon per transportmiddel med plattformer under. Jernbanetorget i Oslo er for
+eksempel ni stasjoner for buss, trikk og T-bane. Søket viser hver stasjon. Har flere samme navn,
+skilles de med transportmiddel, beskrivelse og avstand, som «Jernbanetorget (trikk, foran Oslo S,
+157 m)». Avstanden og posisjonen et søkevalg gir, er til stasjonens plattform nærmest kartets
+midtpunkt. Avstander regnes på WGS84-ellipsoiden, samme datum som GPS og Entur, og er nøyaktige
+på centimeteren innen 2 km.
+
+Kartverkets topografiske kart går til 71,5° N og dekker dermed ikke Svalbard eller Jan Mayen.
+Entur-dataene har heller ingen holdeplasser der.
 
 ## Lagring
 

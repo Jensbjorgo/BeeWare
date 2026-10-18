@@ -165,6 +165,8 @@ test("stops sharing a name get distinct options, and picking one selects that st
     { id: "C", name: "Torget", platform: "", lat: 57, lon: 7 },
     { id: "D", name: "Skolen", platform: "", lat: 59.9, lon: 10.7, distance_m: 850 },
     { id: "E", name: "Skolen", platform: "", lat: 63.4, lon: 10.4, distance_m: 391507 },
+    { id: "F", name: "Jernbanetorget", mode: "T-bane", description: "", lat: 59.912, lon: 10.751, distance_m: 120 },
+    { id: "G", name: "Jernbanetorget", mode: "buss", description: "foran Oslo S", lat: 59.911, lon: 10.75, distance_m: 180 },
   ] }) : undefined);
   const stop = app.element("#stopInput");
   stop.value = "Sentrum";
@@ -172,6 +174,7 @@ test("stops sharing a name get distinct options, and picking one selects that st
   const options = app.element("#stopOptions").innerHTML;
   assert.match(options, /Sentrum \(plattform 1\).*Sentrum \(plattform 2\).*"Torget"/s);
   assert.match(options, /"Skolen \(850 m\)".*"Skolen \(391,5 km\)"/s);
+  assert.match(options, /"Jernbanetorget \(T-bane, 120 m\)".*"Jernbanetorget \(buss, foran Oslo S, 180 m\)"/s);
   stop.value = "Sentrum (plattform 2)";
   await stop.input();
   assert.equal(app.state.selectedLatLng.lat, 59);
@@ -370,7 +373,10 @@ test("stop searches send the map centre, and line options name the operator", as
   const app = await setup((url) => {
     urls.push(url);
     if (url.startsWith("/api/routes")) {
-      return reply({ items: [{ short_name: "31", long_name: "Lade - Tiller", label: "31 Lade - Tiller · AtB" }] });
+      return reply({ items: [
+        { short_name: "31", long_name: "Lade - Tiller", agency: "AtB", label: "31 Lade - Tiller · AtB" },
+        { short_name: "", long_name: "Bastø", agency: "", label: "Bastø" },
+      ] });
     }
   });
   const stop = app.element("#stopInput");
@@ -380,5 +386,9 @@ test("stop searches send the map centre, and line options name the operator", as
   const route = app.element("#routeInput");
   route.value = "31";
   await route.input();
-  assert.equal(app.element("#routeOptions").innerHTML, '<option value="31" label="31 Lade - Tiller · AtB"></option>');
+  // The operator is part of the value, so the published line says which one it was.
+  assert.equal(
+    app.element("#routeOptions").innerHTML,
+    '<option value="31 · AtB" label="31 Lade - Tiller · AtB"></option><option value="Bastø"></option>'
+  );
 });

@@ -10,7 +10,8 @@ L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/
   maxZoom: 18,
   attribution:
     '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
-    '<a href="https://data.norge.no/nlod/no/2.0">Entur (NLOD)</a>',
+    '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
+    '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
 }).addTo(map);
 
 const state = {
@@ -361,13 +362,16 @@ function renderOptions(datalistEl, values, labels = values) {
     .join("");
 }
 
-// Stops that share a name, such as "Sentrum" in many towns, get their platform and distance,
-// or else their ID, so each option is one stop.
+// Stops that share a name, such as "Sentrum" in many towns or the bus, tram and metro stations at
+// Jernbanetorget, get their mode, description, platform and distance, or else their ID, so each
+// option is one stop.
 function stopChoices(stops) {
   const count = (values, value) => values.filter((other) => other === value).length;
   const names = stops.map((stop) => stop.name);
   const labels = stops.map((stop) => {
     const details = [
+      stop.mode,
+      stop.description,
       stop.platform && `plattform ${stop.platform}`,
       stop.distance_m != null && formatDistance(stop.distance_m),
     ].filter(Boolean);
@@ -479,7 +483,10 @@ routeInput.addEventListener("input", async () => {
   try {
     const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
     if (payload) {
-      const values = payload.items.map((item) => item.short_name || item.long_name);
+      // The operator stays in the value, since line 1 in Oslo and line 1 in Trondheim are different lines.
+      const values = payload.items.map((item) =>
+        [item.short_name || item.long_name, item.agency].filter(Boolean).join(" · ")
+      );
       renderOptions(routeOptions, values, payload.items.map((item) => item.label));
     }
   } catch (error) {
