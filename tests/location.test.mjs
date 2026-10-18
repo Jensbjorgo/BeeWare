@@ -35,6 +35,7 @@ async function setup(route = () => undefined) {
     removeLayer(child) { child.removed = true; },
   });
   let currentCallback;
+  let currentError;
   let watchCallback;
   let watchError;
   let watches = 0;
@@ -51,7 +52,7 @@ async function setup(route = () => undefined) {
     },
     document: { querySelector: element },
     navigator: { geolocation: {
-      getCurrentPosition(callback) { currentCallback = callback; },
+      getCurrentPosition(callback, onError) { currentCallback = callback; currentError = onError; },
       watchPosition(callback, onError) { watchCallback = callback; watchError = onError; watches++; return 0; },
       clearWatch() {},
     } },
@@ -72,6 +73,7 @@ async function setup(route = () => undefined) {
     element,
     click: () => element("#locateBtn").click(),
     current: (lat, lon, accuracy = 25) => currentCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
+    currentFails: () => currentError({ code: 3 }),
     watch: (lat, lon, accuracy = 25) => watchCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watches: () => watches,
     watchDenied: () => watchError({ code: 1, PERMISSION_DENIED: 1 }),
@@ -562,6 +564,50 @@ test("GPS fixes do not hold up publishing, and the server picks the stop for the
   app.watch(59.92, 10.76);
   await app.element("#reportForm").submit({ preventDefault() {} });
   assert.deepEqual([posted.lat, posted.lon, posted.stop_name, posted.stop_id], [59.92, 10.76, "", ""]);
+});
+
+test("the GPS button's position wins over a stop search started before it", async () => {
+  let answerSearch;
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return new Promise((resolve) => { answerSearch = resolve; });
+    if (url.startsWith("/api/stops/nearby")) return new Promise(() => {});  // A slow lookup.
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  app.watch(63.43, 10.39);  // Its lookup is still running, so the button's lookup will wait its turn.
+  const stop = app.element("#stopInput");
+  stop.value = "Gløshaugen";
+  stop.input();
+  app.click();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  app.current(63.436, 10.4006);
+  answerSearch(reply({ items: [{ id: "GLO", name: "Gløshaugen", lat: 63.4168, lon: 10.4076 }] }));
+  await sent;
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_id], [63.436, 10.4006, ""]);
+});
+
+test("a report waiting for the GPS button is not sent from the old spot when GPS fails", async () => {
+  let posted;
+  const app = await setup((url, options) => {
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#stopInput", "#routeInput", "#noteInput"]) app.element(id).value = "";
+  app.updateSelection(63.4168, 10.4076);
+  app.click();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  app.currentFails();
+  await sent;
+  assert.equal(posted, undefined);
+  assert.match(app.element("#formStatus").textContent, /Fant ikke posisjonen din/);
+  await app.element("#reportForm").submit({ preventDefault() {} });  // Publishing again uses the spot shown.
+  assert.equal(posted.lat, 63.4168);
 });
 
 test("typing a stop drops a GPS stop lookup still waiting its turn", async () => {

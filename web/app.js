@@ -452,13 +452,18 @@ const showLoadError = (error) => {
   feedStatus.textContent = error.message;
 };
 
+// Empties the stop field, and outdates its pending searches and suggestions.
+function clearStop() {
+  outdate("stop");
+  stopSuggestions.close();
+  stopInput.value = "";
+  stopInput.dataset.stopId = "";
+  stopInput.dataset.fromGps = "false";
+}
+
 async function loadNearbyStop(lat, lon, replaceStop = true) {
   if (replaceStop) {
-    outdate("stop"); // A newer position also outdates pending stop searches and their suggestions.
-    stopSuggestions.close();
-    stopInput.value = "";
-    stopInput.dataset.stopId = "";
-    stopInput.dataset.fromGps = "false";
+    clearStop(); // A newer position also outdates pending stop searches.
   }
   nearestStop.textContent = "Laster...";
   try {
@@ -518,6 +523,7 @@ let gpsLookup = null;
 // Publishing waits for the GPS button's answer, unless the user picks a spot or types a stop meanwhile.
 let gpsWait = Promise.resolve();
 let releaseGpsWait = () => {};
+let gpsButtonFailures = 0;
 
 // A spot the user picks or a stop they type wins over GPS answers and lookups still pending.
 function userChoseManually() {
@@ -545,6 +551,9 @@ function handleLocationUpdate(position, shouldCenter = false, selectLocation = f
   updateCurrentLocation(latitude, longitude, accuracy);
   if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
     updateSelection(latitude, longitude, true);
+    if (selectLocation) {
+      clearStop(); // At once, so an older stop search cannot move the report while the lookup waits its turn.
+    }
     lookUpStopForGps(latitude, longitude, selectLocation);
   }
   if (shouldCenter || !state.hasAutoCentered) {
@@ -578,6 +587,9 @@ function startLocationTracking(selectLocation = false) {
     () => {
       locateBtn.disabled = false;
       setGpsStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      if (selectLocation && state.manualChanges === changesBefore) {
+        gpsButtonFailures++; // A report waiting for this position is not sent from the old one.
+      }
       release();
     },
     { enableHighAccuracy: true, timeout: 10000 }
@@ -675,11 +687,17 @@ reportForm.addEventListener("submit", async (event) => {
   const submitButton = reportForm.querySelector("button[type='submit']");
   submitButton.disabled = true;
   // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
+  const failuresBefore = gpsButtonFailures;
   let waits;
   do {
     waits = [stopSearch, gpsWait];
     await Promise.all(waits);
   } while (waits[0] !== stopSearch || waits[1] !== gpsWait);
+  if (gpsButtonFailures !== failuresBefore) {
+    submitButton.disabled = false;
+    setStatus("Fant ikke posisjonen din. Velg et sted i kartet eller trykk «Bruk min posisjon» igjen.", "error");
+    return;
+  }
   if (!state.selectedLatLng) {
     submitButton.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
