@@ -38,6 +38,7 @@ async function setup(route = () => undefined) {
   let watchCallback;
   let watches = 0;
   let intervals = 0;
+  let poll;
   const context = vm.createContext({
     L: {
       map: () => ({
@@ -58,7 +59,7 @@ async function setup(route = () => undefined) {
       new Promise((resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
     ]),
     AbortController,
-    setInterval() { intervals++; },
+    setInterval(callback) { intervals++; poll = callback; },
   });
   const app = vm.runInContext(
     `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser, loadSightings, sightingMarkers }; })()`, context,
@@ -72,6 +73,7 @@ async function setup(route = () => undefined) {
     watch: (lat, lon, accuracy = 25) => watchCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watches: () => watches,
     intervals: () => intervals,
+    poll: () => poll(),
   };
 }
 
@@ -94,8 +96,41 @@ test("GPS preserves manual selection; button moves selection to current position
   assert.equal(app.state.selectedLatLng.lat, 60);
   assert.equal(app.state.selectedLatLng.lon, 10);
   app.watch(60.1, 10.1);
-  assert.equal(app.state.selectedLatLng.lat, 60);
+  assert.equal(app.state.selectedLatLng.lat, 60.1);  // A position from GPS keeps following GPS.
   assert.equal(app.watches(), 1);
+});
+
+test("an automatic GPS position and its stop follow newer fixes until the user types a stop", async () => {
+  const app = await setup((url) => url.startsWith("/api/stops/nearby")
+    ? reply({ items: [url.includes("lat=59.915") ? { id: "B", name: "Bislett", distance_m: 3 } : { id: "A", name: "Alfa", distance_m: 9 }] })
+    : undefined);
+  const stop = app.element("#stopInput");
+  app.watch(59.911, 10.75, 1000);  // A rough first fix ...
+  await settle();
+  assert.equal(stop.value, "Alfa");
+  app.current(59.915, 10.765, 5);  // ... then a precise one moves both the report and its stop.
+  await settle();
+  assert.deepEqual([app.state.selectedLatLng.lat, stop.value, stop.dataset.stopId], [59.915, "Bislett", "B"]);
+  stop.value = "Bergen";
+  stop.input();
+  app.watch(59.911, 10.75, 20);
+  await settle();
+  assert.equal(stop.value, "Bergen");  // A stop the user typed stays.
+});
+
+test("a poll waits for the previous one, so answers slower than the interval still arrive", async () => {
+  const answers = [];
+  const app = await setup((url) => url === "/api/sightings" ? new Promise((resolve) => answers.push(resolve)) : undefined);
+  answers.shift()(reply({ items: [] }));  // Startup.
+  await settle();
+  app.poll();
+  app.poll();  // 20 s later, while the first poll still waits.
+  assert.equal(answers.length, 1);
+  answers.shift()(reply({ items: [{ id: "s1", lat: 58, lon: 8, created_at: new Date().toISOString(), likes_count: 0 }] }));
+  await settle();
+  assert.ok(app.sightingMarkers.has("s1"));
+  app.poll();
+  assert.equal(answers.length, 1);  // The next poll starts once the previous one is done.
 });
 
 test("GPS creates and updates the accuracy circle in metres", async () => {
@@ -399,6 +434,12 @@ test("old suggestions cannot be picked once the text changes, and closed lists s
   key("ArrowDown");
   key("Enter");
   assert.equal(stop.dataset.stopId, "TRD");
+  stop.value = "Bod";
+  const third = stop.input();
+  key("Escape");  // Escape while the search is loading ...
+  searches[2](reply({ items: [{ id: "BOO", name: "Bodø", lat: 67.28, lon: 14.4 }] }));
+  await third;
+  assert.equal(list.hidden, true);  // ... keeps its answer from opening the list.
 });
 
 test("the first GPS fix leaves a stop search the user already started alone", async () => {

@@ -83,6 +83,11 @@ function suggestionList(input, list, choose) {
     choose(item);
   }
   input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      open = false; // Also while a search is loading, so its answer does not open the list.
+      render();
+      return;
+    }
     if (!items.length) {
       return;
     }
@@ -97,9 +102,6 @@ function suggestionList(input, list, choose) {
     } else if (event.key === "Enter" && open && active >= 0) {
       event.preventDefault(); // Picks the option instead of publishing the report.
       pick(active);
-    } else if (event.key === "Escape" && open) {
-      open = false;
-      render();
     }
   });
   // Keeps focus in the field while an option is clicked, so the blur below does not close the list first.
@@ -280,8 +282,10 @@ function updateAuthUi() {
   userXp.textContent = `${state.stats?.xp ?? 0} XP · ${confirmations(state.stats?.likes_received ?? 0)}`;
 }
 
-function updateSelection(lat, lon) {
+// A position from GPS keeps following GPS; any other choice stays until the user changes it.
+function updateSelection(lat, lon, fromGps = false) {
   state.selectedLatLng = { lat, lon };
+  state.selectionFollowsGps = fromGps;
   selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
     state.selectionMarker = L.marker([lat, lon], {
@@ -431,6 +435,7 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
     stopSuggestions.close();
     stopInput.value = "";
     stopInput.dataset.stopId = "";
+    stopInput.dataset.fromGps = "false";
   }
   nearestStop.textContent = "Laster...";
   try {
@@ -446,6 +451,7 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
     if (closest && !stopInput.value) {
       stopInput.value = closest.name;
       stopInput.dataset.stopId = closest.id;
+      stopInput.dataset.fromGps = String(state.selectionFollowsGps);
     }
   } catch (error) {
     nearestStop.textContent = error.message;
@@ -479,15 +485,16 @@ function selectStop({ stop, label }) {
   map.panTo([stop.lat, stop.lon]);
   nearestStop.textContent = `${label} (valgt)`;
   stopInput.dataset.stopId = stop.id;
+  stopInput.dataset.fromGps = "false";
 }
 
 function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
   const { latitude, longitude, accuracy } = position.coords;
   updateCurrentLocation(latitude, longitude, accuracy);
-  if (selectLocation || !state.selectedLatLng) {
-    updateSelection(latitude, longitude);
-    // The automatic first fix leaves a stop the user is already typing, and its search, alone.
-    loadNearbyStop(latitude, longitude, selectLocation || !stopInput.value);
+  if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
+    updateSelection(latitude, longitude, true);
+    // A stop GPS filled in follows too, but GPS leaves a stop the user is typing, and its search, alone.
+    loadNearbyStop(latitude, longitude, selectLocation || !stopInput.value || stopInput.dataset.fromGps === "true");
   }
   if (shouldCenter || !state.hasAutoCentered) {
     map.flyTo([latitude, longitude], 14);
@@ -540,6 +547,7 @@ stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 async function searchStop() {
   const query = stopInput.value.trim();
   stopInput.dataset.stopId = "";
+  stopInput.dataset.fromGps = "false";
   stopSuggestions.typed();
   try {
     // Results closest to what the map shows come first.
@@ -702,4 +710,8 @@ loadConfig().catch(showLoadError);
 loadCurrentUser().catch((error) => setAuthStatus(error.message, "error"));
 loadSightings().catch(showLoadError);
 startLocationTracking();
-setInterval(() => refresh().catch(showLoadError), 20000);
+// A poll waits for the previous one, since starting a new one would abort answers slower than 20 s.
+let polling = null;
+setInterval(() => {
+  polling ??= refresh().catch(showLoadError).finally(() => (polling = null));
+}, 20000);

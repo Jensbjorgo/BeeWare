@@ -100,9 +100,10 @@ Dette må på plass før appen legges ut på nett:
 
 Trykk «Bruk min posisjon» og gi nettleseren tilgang til posisjonen din.
 Den blå markøren viser hvor du er, og sirkelen viser anslått nøyaktighet.
-Knappen flytter også rapportposisjonen til deg. Et klikk i kartet, flytting av
-rapportmarkøren eller «Bruk kartets midtpunkt» lar deg velge et annet sted uten at GPS
-overskriver valget. Med tastatur flyttes kartet med piltastene.
+Rapportposisjonen og holdeplassen GPS fyller inn følger nye GPS-målinger, og knappen flytter
+rapportposisjonen tilbake til deg. Et klikk i kartet, flytting av rapportmarkøren, «Bruk kartets
+midtpunkt» eller et valgt holdeplassforslag lar deg velge et annet sted uten at GPS overskriver
+valget, og GPS rører heller ikke en holdeplass du skriver inn selv. Med tastatur flyttes kartet med piltastene.
 
 Lokasjon krever HTTPS, med unntak for `localhost` og `127.0.0.1` på samme enhet.
 Åpner du nettsiden på mobil via en vanlig HTTP-adresse på lokalnettet, vil
