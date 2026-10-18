@@ -6,12 +6,14 @@ import hashlib
 import heapq
 import json
 import math
-import os
 import secrets
+import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,9 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 WEB_DIR = BASE_DIR / "web"
 STORAGE_DIR = BASE_DIR / "storage"
-SIGHTINGS_FILE = STORAGE_DIR / "sightings.json"
-USERS_FILE = STORAGE_DIR / "users.json"
-SESSIONS_FILE = STORAGE_DIR / "sessions.json"
+DB_FILE = STORAGE_DIR / "beeware.db"
 
 SIGHTING_TTL_HOURS = 3
 MAX_SIGHTINGS = 500
@@ -35,7 +35,7 @@ NEARBY_STOP_LIMIT = 6
 NEARBY_RADIUS_KM = 2.0
 EARTH_RADIUS_KM = 6371.0
 SESSION_COOKIE = "beeware_session"
-SESSION_TTL_DAYS = 14
+SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
 PBKDF2_ITERATIONS = 120_000
 XP_PER_LIKE = 10
 MAX_BODY_BYTES = 4096
@@ -48,14 +48,6 @@ STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
 # client cannot push all active reports out of the 500-report store.
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def parse_iso8601(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -94,22 +86,6 @@ def parse_coordinate(value: Any, limit: float) -> float:
     if not math.isfinite(number) or abs(number) > limit:
         raise ValueError("out of range")
     return number
-
-
-# ponytail: one lock for all JSON stores in one process; move to SQLite if it outgrows that.
-STORE_LOCK = threading.RLock()
-
-
-def read_json(path: Path) -> Any:
-    # A broken file raises instead of being treated as empty and overwritten.
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_json(path: Path, payload: Any) -> None:
-    raw = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    temp = path.with_suffix(".tmp")
-    temp.write_bytes(raw)
-    os.replace(temp, path)
 
 
 class TransitData:
@@ -209,169 +185,197 @@ class TransitData:
         ]
 
 
-class SightingStore:
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    key TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    xp INTEGER NOT NULL DEFAULT 0,
+    likes_received INTEGER NOT NULL DEFAULT 0,
+    sightings_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_key TEXT NOT NULL REFERENCES users(key) ON DELETE CASCADE,
+    expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sightings (
+    id TEXT PRIMARY KEY,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    route TEXT NOT NULL,
+    note TEXT NOT NULL,
+    reporter TEXT NOT NULL,
+    owner TEXT REFERENCES users(key) ON DELETE SET NULL,
+    created_at REAL NOT NULL,
+    stop_id TEXT NOT NULL,
+    stop_name TEXT NOT NULL,
+    distance_to_stop_m INTEGER
+);
+CREATE INDEX IF NOT EXISTS sightings_created_at ON sightings(created_at);
+CREATE TABLE IF NOT EXISTS likes (
+    sighting_id TEXT NOT NULL REFERENCES sightings(id) ON DELETE CASCADE,
+    user_key TEXT NOT NULL REFERENCES users(key) ON DELETE CASCADE,
+    PRIMARY KEY (sighting_id, user_key)
+);
+"""
+
+SIGHTINGS_QUERY = """
+SELECT s.*, COUNT(l.user_key) AS likes_count, COALESCE(MAX(l.user_key = :user_key), 0) AS liked_by_me
+FROM sightings s LEFT JOIN likes l ON l.sighting_id = s.id
+WHERE s.created_at >= :cutoff AND (:id IS NULL OR s.id = :id)
+GROUP BY s.id
+ORDER BY s.created_at DESC
+LIMIT :limit
+"""
+
+
+def hash_password(password: str, salt_hex: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), PBKDF2_ITERATIONS).hex()
+
+
+def sighting_cutoff() -> float:
+    return time.time() - SIGHTING_TTL_HOURS * 60 * 60
+
+
+def public_sighting(row: Any) -> dict[str, Any]:
+    item = dict(row)
+    del item["owner"]
+    item["created_at"] = datetime.fromtimestamp(item["created_at"], timezone.utc).isoformat()
+    item["liked_by_me"] = bool(item["liked_by_me"])
+    return item
+
+
+class Store:
+    """All persistent data in one SQLite file; safe across threads and processes."""
+
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self.path.write_text("[]\n", encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._read() as db:
+            db.execute("PRAGMA journal_mode = WAL")
+            db.executescript(SCHEMA)
 
-    def _active_items(self) -> list[dict[str, Any]]:
-        cutoff = utc_now() - timedelta(hours=SIGHTING_TTL_HOURS)
-        sightings = read_json(self.path)
-        active = [item for item in sightings if parse_iso8601(item["created_at"]) >= cutoff]
-        active.sort(key=lambda item: item["created_at"], reverse=True)
-        return active[:MAX_SIGHTINGS]
+    @contextmanager
+    def _read(self) -> Iterator[sqlite3.Connection]:
+        # Autocommit connection; _write opens BEGIN IMMEDIATE so read-then-write steps are atomic.
+        with closing(sqlite3.connect(self.path, timeout=10, isolation_level=None)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys = ON")
+            yield db
 
-    def serialize(self, item: dict[str, Any], user_key: str | None = None) -> dict[str, Any]:
-        liked_by = item.get("liked_by") or []
-        public = {key: value for key, value in item.items() if key not in ("liked_by", "owner")}
-        return {
-            **public,
-            "likes_count": len(liked_by),
-            "liked_by_me": bool(user_key and user_key in liked_by),
-        }
+    @contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection]:
+        with self._read() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                yield db
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
 
-    def list_recent(self, user_key: str | None = None) -> list[dict[str, Any]]:
-        with STORE_LOCK:
-            items = self._active_items()
-        return [self.serialize(item, user_key) for item in items]
-
-    def add(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with STORE_LOCK:
-            sightings = self._active_items()
-            sightings.insert(0, payload)
-            write_json(self.path, sightings[:MAX_SIGHTINGS])
-        return payload
-
-    def like(self, sighting_id: str, user_key: str) -> tuple[dict[str, Any], bool]:
-        """Returns the sighting and whether this like is new."""
-        with STORE_LOCK:
-            sightings = self._active_items()
-            item = next((item for item in sightings if item.get("id") == sighting_id), None)
-            if item is None:
-                raise LookupError(sighting_id)
-            if item.get("owner") == user_key:
-                raise ValueError("Du kan ikke bekrefte din egen observasjon.")
-            liked_by = item.setdefault("liked_by", [])
-            if user_key in liked_by:
-                return item, False
-            liked_by.append(user_key)
-            write_json(self.path, sightings)
-        return item, True
-
-
-class AuthStore:
-    def __init__(self, users_path: Path, sessions_path: Path) -> None:
-        self.users_path = users_path
-        self.sessions_path = sessions_path
-        for path in (self.users_path, self.sessions_path):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists():
-                path.write_text("{}\n", encoding="utf-8")
-
-    def _hash_password(self, password: str, salt_hex: str) -> str:
-        digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            bytes.fromhex(salt_hex),
-            PBKDF2_ITERATIONS,
+    def _sightings(self, db: sqlite3.Connection, user_key: str | None, sighting_id: str | None = None) -> list[dict[str, Any]]:
+        rows = db.execute(
+            SIGHTINGS_QUERY,
+            {"user_key": user_key, "cutoff": sighting_cutoff(), "id": sighting_id, "limit": MAX_SIGHTINGS},
         )
-        return digest.hex()
+        return [public_sighting(row) for row in rows]
+
+    def list_sightings(self, user_key: str | None = None) -> list[dict[str, Any]]:
+        with self._read() as db:
+            return self._sightings(db, user_key)
+
+    def add_sighting(self, sighting: dict[str, Any]) -> None:
+        with self._write() as db:
+            db.execute("DELETE FROM sightings WHERE created_at < ?", (sighting_cutoff(),))
+            db.execute(
+                "INSERT INTO sightings (id, lat, lon, route, note, reporter, owner, created_at, stop_id, stop_name,"
+                " distance_to_stop_m) VALUES (:id, :lat, :lon, :route, :note, :reporter, :owner, :created_at,"
+                " :stop_id, :stop_name, :distance_to_stop_m)",
+                sighting,
+            )
+            if sighting["owner"]:
+                db.execute("UPDATE users SET sightings_count = sightings_count + 1 WHERE key = ?", (sighting["owner"],))
+
+    def like_sighting(self, sighting_id: str, user_key: str) -> dict[str, Any]:
+        """Records one like per account and gives the owner XP in the same transaction."""
+        with self._write() as db:
+            row = db.execute(
+                "SELECT owner FROM sightings WHERE id = ? AND created_at >= ?", (sighting_id, sighting_cutoff())
+            ).fetchone()
+            if row is None:
+                raise LookupError(sighting_id)
+            if row["owner"] == user_key:
+                raise ValueError("Du kan ikke bekrefte din egen observasjon.")
+            added = db.execute("INSERT OR IGNORE INTO likes VALUES (?, ?)", (sighting_id, user_key)).rowcount
+            if added and row["owner"]:
+                db.execute(
+                    "UPDATE users SET xp = xp + ?, likes_received = likes_received + 1 WHERE key = ?",
+                    (XP_PER_LIKE, row["owner"]),
+                )
+            return self._sightings(db, user_key, sighting_id)[0]
 
     def create_user(self, username: str, password: str) -> dict[str, str]:
         salt = secrets.token_hex(16)
-        password_hash = self._hash_password(password, salt)
-        key = username.casefold()
-        with STORE_LOCK:
-            users = read_json(self.users_path)
-            if key in users:
-                raise ValueError("Brukernavnet er allerede i bruk.")
-            users[key] = {
-                "username": username,
-                "salt": salt,
-                "password_hash": password_hash,
-                "created_at": utc_now().isoformat(),
-            }
-            write_json(self.users_path, users)
+        password_hash = hash_password(password, salt)  # Slow on purpose, so keep it outside the write lock.
+        try:
+            with self._write() as db:
+                db.execute(
+                    "INSERT INTO users (key, username, salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (username.casefold(), username, salt, password_hash, time.time()),
+                )
+        except sqlite3.IntegrityError:
+            raise ValueError("Brukernavnet er allerede i bruk.") from None
         return {"username": username}
 
     def authenticate(self, username: str, password: str) -> dict[str, str] | None:
-        users = read_json(self.users_path)
-        user = users.get(username.casefold())
-        if not user:
-            return None
-        password_hash = self._hash_password(password, user["salt"])
-        if not secrets.compare_digest(password_hash, user["password_hash"]):
+        with self._read() as db:
+            user = db.execute("SELECT * FROM users WHERE key = ?", (username.casefold(),)).fetchone()
+        if not user or not secrets.compare_digest(hash_password(password, user["salt"]), user["password_hash"]):
             return None
         return {"username": user["username"]}
 
-    def add_stats(self, user_key: str, **increments: int) -> None:
-        with STORE_LOCK:
-            users = read_json(self.users_path)
-            user = users.get(user_key)
-            if user is None:
-                return
-            for field, amount in increments.items():
-                user[field] = user.get(field, 0) + amount
-            write_json(self.users_path, users)
-
     def stats(self, username: str) -> dict[str, int]:
-        user = read_json(self.users_path).get(username.casefold(), {})
-        xp = user.get("xp", 0)
-        return {
-            "xp": xp,
-            "level": int(math.sqrt(xp / XP_PER_LIKE)) + 1,
-            "likes_received": user.get("likes_received", 0),
-            "sightings_count": user.get("sightings_count", 0),
-        }
+        with self._read() as db:
+            user = db.execute(
+                "SELECT xp, likes_received, sightings_count FROM users WHERE key = ?", (username.casefold(),)
+            ).fetchone()
+        stats = dict(user) if user else {"xp": 0, "likes_received": 0, "sightings_count": 0}
+        return {**stats, "level": int(math.sqrt(stats["xp"] / XP_PER_LIKE)) + 1}
 
     def create_session(self, username: str) -> str:
         token = secrets.token_urlsafe(24)
-        now = utc_now()
-        with STORE_LOCK:
-            sessions = {
-                key: value
-                for key, value in read_json(self.sessions_path).items()
-                if parse_iso8601(value["expires_at"]) >= now
-            }
-            sessions[token] = {
-                "username": username,
-                "expires_at": (now + timedelta(days=SESSION_TTL_DAYS)).isoformat(),
-            }
-            write_json(self.sessions_path, sessions)
+        now = time.time()
+        with self._write() as db:
+            db.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+            db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (token, username.casefold(), now + SESSION_TTL_SECONDS))
         return token
 
     def get_session_user(self, token: str | None) -> dict[str, str] | None:
         if not token:
             return None
-
-        with STORE_LOCK:
-            sessions = read_json(self.sessions_path)
-            session = sessions.get(token)
-            if not session:
-                return None
-            if parse_iso8601(session["expires_at"]) < utc_now():
-                sessions.pop(token, None)
-                write_json(self.sessions_path, sessions)
-                return None
-        return {"username": session["username"]}
+        with self._read() as db:
+            row = db.execute(
+                "SELECT u.username FROM sessions s JOIN users u ON u.key = s.user_key"
+                " WHERE s.token = ? AND s.expires_at >= ?",
+                (token, time.time()),
+            ).fetchone()
+        return {"username": row["username"]} if row else None
 
     def delete_session(self, token: str | None) -> None:
-        if not token:
-            return
-        with STORE_LOCK:
-            sessions = read_json(self.sessions_path)
-            if token in sessions:
-                sessions.pop(token, None)
-                write_json(self.sessions_path, sessions)
+        if token:
+            with self._write() as db:
+                db.execute("DELETE FROM sessions WHERE token = ?", (token,))
 
 
 transit_data = TransitData(DATA_DIR)
-sighting_store = SightingStore(SIGHTINGS_FILE)
-auth_store = AuthStore(USERS_FILE, SESSIONS_FILE)
+store = Store(DB_FILE)
 # ponytail: in-memory and per client IP; resets on restart.
 recent_requests: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+RATE_LOCK = threading.Lock()
 
 
 class AppHandler(SimpleHTTPRequestHandler):
@@ -423,12 +427,12 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/me":
             user = self.current_user()
-            stats = auth_store.stats(user["username"]) if user else None
+            stats = store.stats(user["username"]) if user else None
             self.send_json({"user": user, "stats": stats})
             return
 
         if parsed.path == "/api/sightings":
-            self.send_json({"items": sighting_store.list_recent(self.current_user_key())})
+            self.send_json({"items": store.list_sightings(self.current_user_key())})
             return
 
         if parsed.path == "/api/stops/search":
@@ -476,7 +480,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         nearest = nearby[0] if nearby else None
 
         owner = user["username"].casefold() if user else None
-        payload = {
+        sighting = {
             "id": secrets.token_hex(16),
             "lat": lat,
             "lon": lon,
@@ -484,16 +488,13 @@ class AppHandler(SimpleHTTPRequestHandler):
             "note": note,
             "reporter": user["username"] if user else "Anonym",
             "owner": owner,
-            "created_at": utc_now().isoformat(),
+            "created_at": time.time(),
             "stop_id": stop_id or (nearest["id"] if nearest else ""),
             "stop_name": stop_name or (nearest["name"] if nearest else "Ukjent sted"),
             "distance_to_stop_m": nearest["distance_m"] if nearest else None,
-            "liked_by": [],
         }
-        sighting_store.add(payload)
-        if owner:
-            auth_store.add_stats(owner, sightings_count=1)
-        self.send_json(sighting_store.serialize(payload, owner), status=HTTPStatus.CREATED)
+        store.add_sighting(sighting)
+        self.send_json(public_sighting({**sighting, "likes_count": 0, "liked_by_me": 0}), status=HTTPStatus.CREATED)
 
     def handle_like_sighting(self, path: str) -> None:
         prefix = "/api/sightings/"
@@ -507,17 +508,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "Logg inn for å bekrefte observasjoner."}, status=HTTPStatus.UNAUTHORIZED)
             return
         try:
-            with STORE_LOCK:
-                item, is_new = sighting_store.like(sighting_id, user_key)
-                if is_new and item.get("owner"):
-                    auth_store.add_stats(item["owner"], xp=XP_PER_LIKE, likes_received=1)
+            item = store.like_sighting(sighting_id, user_key)
         except LookupError:
             self.send_json({"error": "Fant ikke observasjonen."}, status=HTTPStatus.NOT_FOUND)
             return
         except ValueError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
-        self.send_json({"item": sighting_store.serialize(item, user_key)})
+        self.send_json({"item": item})
 
     def handle_register(self) -> None:
         if self.reject_if_rate_limited("register"):
@@ -532,11 +530,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            user = auth_store.create_user(username, password)
+            user = store.create_user(username, password)
         except ValueError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
-        token = auth_store.create_session(user["username"])
+        token = store.create_session(user["username"])
         self.send_json({"user": user}, status=HTTPStatus.CREATED, cookie_token=token)
 
     def handle_login(self) -> None:
@@ -547,15 +545,15 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
         username = compact_whitespace(str(data.get("username") or ""))
         password = str(data.get("password") or "")
-        user = auth_store.authenticate(username, password)
+        user = store.authenticate(username, password)
         if not user:
             self.send_json({"error": "Feil brukernavn eller passord."}, status=HTTPStatus.UNAUTHORIZED)
             return
-        token = auth_store.create_session(user["username"])
+        token = store.create_session(user["username"])
         self.send_json({"user": user}, cookie_token=token)
 
     def handle_logout(self) -> None:
-        auth_store.delete_session(self.cookie_value(SESSION_COOKIE))
+        store.delete_session(self.cookie_value(SESSION_COOKIE))
         self.send_json({"ok": True}, clear_cookie=True)
 
     def validate_credentials(self, username: str, password: str) -> str | None:
@@ -579,7 +577,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def reject_if_rate_limited(self, action: str) -> bool:
         limit, window = RATE_LIMITS[action]
         now = time.monotonic()
-        with STORE_LOCK:
+        with RATE_LOCK:
             hits = recent_requests[(action, self.client_ip())]
             while hits and hits[0] <= now - window:
                 hits.popleft()
@@ -618,7 +616,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         return forwarded.split(",")[-1].strip() if forwarded else self.client_address[0]
 
     def current_user(self) -> dict[str, str] | None:
-        return auth_store.get_session_user(self.cookie_value(SESSION_COOKIE))
+        return store.get_session_user(self.cookie_value(SESSION_COOKIE))
 
     def current_user_key(self) -> str | None:
         user = self.current_user()
@@ -649,10 +647,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         if cookie_token:
-            max_age = SESSION_TTL_DAYS * 24 * 60 * 60
             self.send_header(
                 "Set-Cookie",
-                f"{SESSION_COOKIE}={cookie_token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Lax{secure}",
+                f"{SESSION_COOKIE}={cookie_token}; Max-Age={SESSION_TTL_SECONDS}; Path=/; HttpOnly; SameSite=Lax{secure}",
             )
         if clear_cookie:
             self.send_header(

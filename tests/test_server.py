@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Starts the real server on a free port and gives each snippet a small HTTP client.
 HTTP_PRELUDE = """
-import http.client, json, threading
+import http.client, json, threading, time
 import server
 httpd = server.AppServer(("127.0.0.1", 0), server.AppHandler)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -27,6 +27,10 @@ def request(method, path, body=None, headers=None):
 
 def session(cookies):
     return {"Cookie": cookies[0].split(";")[0]}
+
+def sql(query, *args):
+    with server.store._write() as db:
+        return db.execute(query, args).fetchall()
 """
 
 
@@ -50,8 +54,8 @@ class FreshCheckoutTests(unittest.TestCase):
 assert server.transit_data.search_stops('sentrum') == []
 assert server.transit_data.search_routes('') == []
 assert server.transit_data.find_nearby_stops(58.15, 8.0) == []
-assert server.sighting_store.list_recent() == []
-auth = server.auth_store
+assert server.store.list_sightings() == []
+auth = server.store
 auth.create_user('tester', 'test-password')
 assert auth.authenticate('tester', 'wrong') is None
 assert auth.authenticate('tester', 'test-password') == {'username': 'tester'}
@@ -59,7 +63,7 @@ token = auth.create_session('tester')
 assert auth.get_session_user(token) == {'username': 'tester'}
 auth.delete_session(token)
 assert auth.get_session_user(token) is None
-assert server.read_json(auth.sessions_path) == {}
+assert sql("SELECT * FROM sessions") == []
 """)
 
     def test_gtfs_search_and_nearest_stop(self):
@@ -92,21 +96,22 @@ class RegressionTests(unittest.TestCase):
     def test_concurrent_writes_keep_every_report_and_user(self):
         run_in_copy(self, """
 def report(i):
-    server.sighting_store.add({"id": str(i), "lat": 58, "lon": 8, "reporter": "Anonym", "owner": None,
-                               "created_at": server.utc_now().isoformat(), "liked_by": []})
+    server.store.add_sighting({"id": str(i), "lat": 58, "lon": 8, "route": "", "note": "", "reporter": "Anonym",
+                               "owner": None, "created_at": time.time(), "stop_id": "", "stop_name": "",
+                               "distance_to_stop_m": None})
 registered = []
 def register(i):
     try:
-        server.auth_store.create_user("same", f"password-{i}")
+        server.store.create_user("same", f"password-{i}")
         registered.append(i)
     except ValueError:
         pass
 threads = [threading.Thread(target=f, args=(i,)) for i in range(30) for f in (report, register)]
 [t.start() for t in threads]
 [t.join() for t in threads]
-assert len(server.sighting_store.list_recent()) == 30
+assert len(server.store.list_sightings()) == 30
 assert len(registered) == 1, registered
-assert sum(bool(server.auth_store.authenticate("same", f"password-{i}")) for i in range(30)) == 1
+assert sum(bool(server.store.authenticate("same", f"password-{i}")) for i in range(30)) == 1
 """)
 
     def test_bad_requests_are_rejected_without_losing_data(self):
@@ -138,10 +143,11 @@ assert request("POST", "/api/sightings", {"lat": 58, "lon": 8}, other)[0] == 201
 
     def test_sessions_are_cleaned_and_secure_behind_https(self):
         run_in_copy(self, """
-auth = server.auth_store
-server.write_json(auth.sessions_path, {"old": {"username": "x", "expires_at": "2000-01-01T00:00:00+00:00"}})
-auth.create_session("x")
-assert "old" not in server.read_json(auth.sessions_path)
+server.store.create_user("old-user", "secret1")
+sql("INSERT INTO sessions VALUES ('old', 'old-user', 0)")
+assert server.store.get_session_user("old") is None
+server.store.create_session("old-user")
+assert sql("SELECT * FROM sessions WHERE token = 'old'") == []
 cookies = request("POST", "/api/auth/register", {"username": "tester", "password": "secret1"},
                   {"X-Forwarded-Proto": "https"})[2]
 assert cookies and all("Secure" in cookie for cookie in cookies), cookies
@@ -162,7 +168,9 @@ item = request("POST", f"/api/sightings/{first}/like", headers=bob)[1]["item"]
 request("POST", f"/api/sightings/{first}/like", headers=bob)
 assert item["likes_count"] == 1 and item["liked_by_me"] and "liked_by" not in item
 assert all("liked_by" not in item for item in request("GET", "/api/sightings")[1]["items"])
-server.write_json(server.SIGHTINGS_FILE, [])  # The report expires; the XP must stay.
+sql("UPDATE sightings SET created_at = 0")  # Both reports expire ...
+assert request("POST", f"/api/sightings/{second}/like", headers=bob)[0] == 404
+sql("DELETE FROM sightings")  # ... and are cleaned away; the XP must stay.
 stats = request("GET", "/api/me", headers=alice)[1]["stats"]
 assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 2}, stats
 """)
