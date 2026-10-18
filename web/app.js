@@ -157,9 +157,11 @@ const stopSuggestions = suggestionList(stopInput, stopOptions, (choice) => {
   stopInput.value = choice.label;
   selectStop(choice);
 });
+let routePicked = false; // A picked line stays; typed text is searched again when the report moves.
 const routeSuggestions = suggestionList(routeInput, routeOptions, (route) => {
   outdate("route");
   routeInput.value = route.value;
+  routePicked = true;
 });
 
 const REQUEST_TIMEOUT_MS = 15000;
@@ -317,6 +319,11 @@ function updateSelection(lat, lon, fromGps = false) {
   state.selectionFollowsGps = fromGps;
   if (!fromGps) {
     userChoseManually();
+  }
+  // Line suggestions are ranked by the report position, so they are replaced when it moves.
+  if (!routePicked && routeInput.value.trim()) {
+    routeSuggestions.show([]);
+    searchRoute();
   }
   selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
@@ -681,9 +688,14 @@ async function searchStop() {
   }
 }
 
-routeInput.addEventListener("input", async () => {
-  const setRouteStatus = lateStatus();
+routeInput.addEventListener("input", () => {
+  routePicked = false;
   routeSuggestions.typed();
+  return searchRoute();
+});
+
+async function searchRoute() {
+  const setRouteStatus = lateStatus();
   try {
     // Lines stopping near the report come first, so "3" by Gløshaugen is AtB's line 3.
     const center = map.wrapLatLng(map.getCenter());
@@ -697,7 +709,7 @@ routeInput.addEventListener("input", async () => {
     routeSuggestions.show([]);
     setRouteStatus(error.message, "error");
   }
-});
+}
 
 // Likes, reports and deletes are idempotent on the server, so the buttons stay enabled.
 const feedActions = {

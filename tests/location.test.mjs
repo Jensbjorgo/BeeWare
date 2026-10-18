@@ -14,6 +14,7 @@ async function setup(route = () => undefined) {
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, {
       id: selector.slice(1),
+      value: "",  // Like an empty input.
       classList: { toggle() {} },
       dataset: {},
       addEventListener(event, handler) { this[event] = handler; },
@@ -813,4 +814,26 @@ test("owners can delete their sighting and logged-in users can report others", a
   await click({ deleteId: "own" });
   assert.deepEqual(posts, ["/api/sightings/other/report", "/api/sightings/own/delete"]);
   assert.equal(app.element("#formStatus").textContent, "Observasjonen er slettet.");
+});
+
+test("line suggestions follow the report position until a line is picked", async () => {
+  const answers = [];
+  const app = await setup((url) => url.startsWith("/api/routes") ? new Promise((resolve) => answers.push({ url, resolve })) : undefined);
+  const route = app.element("#routeInput");
+  const options = app.element("#routeOptions");
+  const lines = (value) => reply({ items: [{ value, label: value }] });
+  app.updateSelection(59.91, 10.75);
+  route.value = "3";
+  route.input();
+  app.updateSelection(63.4168, 10.4076, true);  // GPS moves the report before the answer for Oslo comes.
+  assert.match(answers[1].url, /lat=63.4168&lon=10.4076/);
+  answers[0].resolve(lines("3 · Ruter"));
+  answers[1].resolve(lines("3 · AtB"));
+  await settle();
+  assert.match(options.innerHTML, /3 · AtB/);
+  assert.doesNotMatch(options.innerHTML, /Ruter/);
+  options.click({ target: { closest: () => ({ dataset: { index: "0" } }) } });
+  assert.equal(route.value, "3 · AtB");
+  app.updateSelection(59.91, 10.75);
+  assert.equal(answers.length, 2);  // A picked line is not searched again.
 });
