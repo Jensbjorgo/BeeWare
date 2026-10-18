@@ -48,6 +48,11 @@ STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
 # client cannot push all active reports out of the 500-report store.
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
+# Leaflet comes from unpkg and the map tiles from OpenStreetMap; nothing else is loaded.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; "
+    "img-src 'self' data: https://tile.openstreetmap.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+)
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -71,9 +76,7 @@ def compact_whitespace(value: str) -> str:
 
 
 def clean_text(value: Any, limit: int) -> str:
-    text = compact_whitespace(str(value or ""))[:limit]
-    text.encode("utf-8")  # Raises UnicodeEncodeError (a ValueError) for lone surrogates.
-    return text
+    return compact_whitespace(str(value or ""))[:limit]
 
 
 def parse_coordinate(value: Any, limit: float) -> float:
@@ -98,62 +101,61 @@ class TransitData:
             self._load_routes(data_dir / "routes.txt")
 
     def _load_stops(self, path: Path) -> None:
-        with path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
+        # utf-8-sig: GTFS files may start with a byte order mark.
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            for row in csv.DictReader(handle):
                 try:
-                    lat = float(row["stop_lat"])
-                    lon = float(row["stop_lon"])
-                except (TypeError, ValueError):
-                    continue
-
-                stop = {
-                    "id": row["stop_id"],
-                    "name": compact_whitespace(row["stop_name"]),
-                    "lat": lat,
-                    "lon": lon,
-                    "platform": row.get("platform_code") or "",
-                    "description": compact_whitespace(row.get("stop_desc") or ""),
-                }
+                    stop = {
+                        "id": compact_whitespace(row["stop_id"]),
+                        "name": compact_whitespace(row["stop_name"]),
+                        "lat": parse_coordinate(row["stop_lat"], 90),
+                        "lon": parse_coordinate(row["stop_lon"], 180),
+                        "platform": row.get("platform_code") or "",
+                        "description": compact_whitespace(row.get("stop_desc") or ""),
+                    }
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    continue  # Missing columns, short rows and invalid coordinates are skipped.
                 self.stops_by_id[stop["id"]] = stop
 
     def _load_routes(self, path: Path) -> None:
         seen: set[tuple[str, str]] = set()
-        with path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            for row in csv.DictReader(handle):
                 short_name = compact_whitespace(row.get("route_short_name") or "")
                 long_name = compact_whitespace(row.get("route_long_name") or "")
                 key = (short_name.casefold(), long_name.casefold())
-                if not short_name or key in seen:
+                if not (short_name or long_name) or key in seen:  # GTFS requires one of the names.
                     continue
                 seen.add(key)
                 self.route_index.append(
                     {
-                        "id": row["route_id"],
+                        "id": row.get("route_id") or "",
                         "short_name": short_name,
                         "long_name": long_name,
                         "label": f"{short_name} {long_name}".strip(),
                     }
                 )
-        self.route_index.sort(key=lambda item: item["short_name"])
+        self.route_index.sort(key=lambda item: item["label"])
 
     def search_stops(self, query: str, limit: int = STOP_SEARCH_LIMIT) -> list[dict[str, Any]]:
         needle = compact_whitespace(query).casefold()
         if len(needle) < 2:
             return []
 
+        matches = sorted(
+            (
+                stop for stop in self.stops_by_id.values()
+                if needle in f"{stop['name']} {stop['description']} {stop['platform']}".casefold()
+            ),
+            key=lambda stop: stop["name"].casefold() != needle,  # Exact names first, before the limit.
+        )
         results: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
-        for stop in self.stops_by_id.values():
-            haystack = f"{stop['name']} {stop['description']} {stop['platform']}".casefold()
-            if needle not in haystack:
-                continue
-            dedupe_key = f"{stop['name'].casefold()}|{round(stop['lat'], 5)}|{round(stop['lon'], 5)}"
-            if dedupe_key in seen_names:
-                continue
-            seen_names.add(dedupe_key)
-            results.append(stop)
+        seen: set[tuple[str, float, float]] = set()
+        for stop in matches:
+            key = (stop["name"].casefold(), round(stop["lat"], 5), round(stop["lon"], 5))
+            if key not in seen:
+                seen.add(key)
+                results.append(stop)
             if len(results) >= limit:
                 break
         return results
@@ -393,10 +395,21 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.path = "/index.html"
         super().do_GET()
 
+    def end_headers(self) -> None:
+        # Every response, static files and errors included, refuses framing and MIME sniffing.
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         origin = self.headers.get("Origin")
-        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+        try:
+            foreign = bool(origin) and urlparse(origin).netloc != self.headers.get("Host")
+        except ValueError:  # An unparsable Origin such as "http://[" counts as foreign.
+            foreign = True
+        if foreign:
             self.send_json({"error": "Forespørselen kommer fra en annen side."}, status=HTTPStatus.FORBIDDEN)
             return
         if parsed.path == "/api/sightings":
@@ -414,7 +427,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/auth/logout":
             self.handle_logout()
             return
-        self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+        self.send_json({"error": "Ukjent adresse."}, status=HTTPStatus.NOT_FOUND)
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -445,7 +458,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 lat = parse_coordinate(params.get("lat", [None])[0], 90)
                 lon = parse_coordinate(params.get("lon", [None])[0], 180)
             except (TypeError, ValueError):
-                self.send_json({"error": "lat and lon must be valid coordinates"}, status=HTTPStatus.BAD_REQUEST)
+                self.send_json({"error": "Ugyldig posisjon."}, status=HTTPStatus.BAD_REQUEST)
                 return
             self.send_json({"items": transit_data.find_nearby_stops(lat, lon)})
             return
@@ -455,7 +468,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"items": transit_data.search_routes(query)})
             return
 
-        self.send_json({"error": "Unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
+        self.send_json({"error": "Ukjent adresse."}, status=HTTPStatus.NOT_FOUND)
 
     def handle_api_post_sighting(self) -> None:
         if self.reject_if_rate_limited("sighting"):
@@ -478,6 +491,8 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         nearby = transit_data.find_nearby_stops(lat, lon, limit=1)
         nearest = nearby[0] if nearby else None
+        # A known stop ID wins; without a typed name the nearest stop fills in both ID and name.
+        stop = transit_data.stops_by_id.get(stop_id) or (None if stop_name else nearest)
 
         owner = user["username"].casefold() if user else None
         sighting = {
@@ -489,8 +504,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             "reporter": user["username"] if user else "Anonym",
             "owner": owner,
             "created_at": time.time(),
-            "stop_id": stop_id or (nearest["id"] if nearest else ""),
-            "stop_name": stop_name or (nearest["name"] if nearest else "Ukjent sted"),
+            "stop_id": stop["id"] if stop else "",
+            "stop_name": stop["name"] if stop else stop_name or "Ukjent sted",
             "distance_to_stop_m": nearest["distance_m"] if nearest else None,
         }
         store.add_sighting(sighting)
@@ -563,21 +578,20 @@ class AppHandler(SimpleHTTPRequestHandler):
             return "Brukernavn kan ikke være lengre enn 24 tegn."
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
         if any(char not in allowed for char in username):
-            return "Brukernavn kan bare inneholde bokstaver, tall, bindestrek og understrek."
+            return "Brukernavn kan bare inneholde a–z, tall, bindestrek og understrek."
         if username.casefold() == "anonym":
             return "Brukernavnet er reservert."
         if len(password) < 6:
             return "Passord må være minst 6 tegn."
-        try:
-            password.encode("utf-8")
-        except UnicodeEncodeError:
-            return "Passordet inneholder ugyldige tegn."
         return None
 
     def reject_if_rate_limited(self, action: str) -> bool:
         limit, window = RATE_LIMITS[action]
         now = time.monotonic()
         with RATE_LOCK:
+            # ponytail: sweeps every client per call; fine for this traffic, use a timed sweep if it grows.
+            for key in [key for key, hits in recent_requests.items() if hits[-1] <= now - RATE_LIMITS[key[0]][1]]:
+                del recent_requests[key]
             hits = recent_requests[(action, self.client_ip())]
             while hits and hits[0] <= now - window:
                 hits.popleft()
@@ -589,23 +603,24 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def read_json_body(self) -> dict[str, Any] | None:
         if self.headers.get_content_type() != "application/json":
-            self.send_json({"error": "Content-Type must be application/json"}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            self.send_json({"error": "Forespørselen må være JSON."}, status=HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
             return None
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             content_length = -1
         if not 0 <= content_length <= MAX_BODY_BYTES:
-            self.send_json({"error": "Invalid or too large body"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            self.send_json({"error": "Forespørselen er for stor."}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return None
         body = self.rfile.read(content_length)
         try:
             data = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self.send_json({"error": "Invalid JSON"}, status=HTTPStatus.BAD_REQUEST)
+            json.dumps(data, ensure_ascii=False).encode("utf-8")  # Rejects lone surrogates such as "\ud800".
+        except ValueError:  # Covers bad UTF-8, invalid JSON and the surrogate check.
+            self.send_json({"error": "Ugyldig JSON."}, status=HTTPStatus.BAD_REQUEST)
             return None
         if not isinstance(data, dict):
-            self.send_json({"error": "JSON body must be an object"}, status=HTTPStatus.BAD_REQUEST)
+            self.send_json({"error": "Ugyldig JSON."}, status=HTTPStatus.BAD_REQUEST)
             return None
         return data
 
@@ -680,7 +695,8 @@ def run() -> None:
     host = "127.0.0.1"
     port = 8080
     server = AppServer((host, port), AppHandler)
-    print(f"Serving BeeWare on http://{host}:{port}")
+    print(f"Serving BeeWare on http://{host}:{port} with {len(transit_data.stops_by_id)} stops"
+          f" and {len(transit_data.route_index)} routes")
     server.serve_forever()
 
 

@@ -34,13 +34,13 @@ def sql(query, *args):
 """
 
 
-def run_in_copy(test, code, stops=None):
+def run_in_copy(test, code, data=None):
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory)
         shutil.copy(ROOT / "server.py", target / "server.py")
-        if stops:
-            (target / "data").mkdir()
-            (target / "data/stops.txt").write_text(stops, encoding="utf-8")
+        (target / "data").mkdir()
+        for name, text in (data or {}).items():
+            (target / "data" / name).write_text(text, encoding="utf-8")
         result = subprocess.run(
             [sys.executable, "-c", HTTP_PRELUDE + code],
             cwd=target, capture_output=True, text=True,
@@ -67,29 +67,20 @@ assert sql("SELECT * FROM sessions") == []
 """)
 
     def test_gtfs_search_and_nearest_stop(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory)
-            shutil.copy(ROOT / "server.py", target / "server.py")
-            (target / "data").mkdir()
-            (target / "data/stops.txt").write_text(
-                "stop_id,stop_name,stop_lat,stop_lon\n1,Sentrum,58.15,8.0\n",
-                encoding="utf-8",
-            )
-            (target / "data/routes.txt").write_text(
-                "route_id,route_short_name,route_long_name\n1,10,Sentrum\n",
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [sys.executable, "-c", """
-import server
+        # A byte order mark, bad coordinates and short rows must not stop the server.
+        partial = "".join(f"p{i},Sentrum park {i},58.1,8.1\n" for i in range(12))
+        stops = f"\ufeffstop_id,stop_name,stop_lat,stop_lon\n{partial}1,Sentrum,58.15,8.0\nbad,Inf,inf,8\nnan,NaN,nan,8\nshort,Kort\n"
+        run_in_copy(self, """
 data = server.transit_data
-assert data.search_stops('sent')[0]['id'] == '1'
+assert sorted(data.stops_by_id) == sorted([*(f"p{i}" for i in range(12)), "1"])
+assert data.search_stops('sentrum')[0]['id'] == '1'  # The exact name beats 12 partial matches.
 assert data.search_routes('10')[0]['long_name'] == 'Sentrum'
+assert data.search_routes('fly')[0]['label'] == 'Flybuss'
 assert data.find_nearby_stops(58.15, 8.0)[0]['distance_m'] == 0
-"""],
-                cwd=target, capture_output=True, text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+""", data={
+            "stops.txt": stops,
+            "routes.txt": "\ufeffroute_id,route_short_name,route_long_name\n1,10,Sentrum\n2,,Flybuss\n",
+        })
 
 
 class RegressionTests(unittest.TestCase):
@@ -126,13 +117,19 @@ assert request("POST", "/api/sightings", "{}", {"Content-Length": "99999"})[0] =
 assert request("POST", "/api/sightings", "{}", {"Content-Length": "abc"})[0] == 413
 assert request("POST", "/api/sightings", '{"lat": 58, "lon": 8}', {"Content-Type": "text/plain"})[0] == 415
 assert request("POST", "/api/sightings", {"lat": 58, "lon": 8}, {"Origin": "http://evil.test"})[0] == 403
+assert request("POST", "/api/sightings", {"lat": 58, "lon": 8}, {"Origin": "http://["})[0] == 403
+server.store.create_user("alice", "secret1")
+assert request("POST", "/api/auth/login", '{"username": "alice", "password": "\\\\ud800"}')[0] == 400
+assert request("POST", "/api/nothing", {})[0] == 404
 items = request("GET", "/api/sightings")[1]["items"]
 assert len(items) == 1 and len(items[0]["route"]) == server.ROUTE_MAX
 """)
 
     def test_rate_limits_report_spam_and_login_guessing(self):
         run_in_copy(self, """
+server.recent_requests[("login", "gone")].append(0.0)  # An expired client is swept away.
 statuses = [request("POST", "/api/sightings", {"lat": 58, "lon": 8})[0] for _ in range(4)]
+assert ("login", "gone") not in server.recent_requests
 assert statuses == [201, 201, 201, 429], statuses
 logins = [request("POST", "/api/auth/login", {"username": "x", "password": "y"})[0] for _ in range(11)]
 assert logins[-2:] == [401, 429], logins
@@ -175,8 +172,25 @@ stats = request("GET", "/api/me", headers=alice)[1]["stats"]
 assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 2}, stats
 """)
 
-    def test_nearest_stop_is_the_closest_one(self):
+    def test_nearest_stop_is_the_closest_one_and_names_match_ids(self):
         run_in_copy(self, """
-nearby = server.transit_data.find_nearby_stops(58.15, 8.0)
-assert [stop["id"] for stop in nearby] == ["east"], nearby
-""", stops="stop_id,stop_name,stop_lat,stop_lon\nnorth,Nord,58.17,8.0\neast,Ost,58.15,8.03\nfar,Fjern,59.0,8.0\n")
+data = server.transit_data
+assert [stop["id"] for stop in data.find_nearby_stops(58.15, 8.0)] == ["east", "north"]
+assert [stop["id"] for stop in data.find_nearby_stops(58.15, 8.0, limit=1)] == ["east"]
+def report(**fields):
+    item = request("POST", "/api/sightings", {"lat": 58.15, "lon": 8.0, **fields})[1]
+    return item["stop_id"], item["stop_name"], item["distance_to_stop_m"]
+assert report() == ("east", "Ost", 586)
+assert report(stop_name="Mitt sted") == ("", "Mitt sted", 586)
+assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 586)
+""", data={"stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nnorth,Nord,58.165,8.0\neast,Ost,58.15,8.01\nfar,Fjern,59.0,8.0\n"})
+
+    def test_every_response_refuses_framing_and_sniffing(self):
+        run_in_copy(self, """
+for path in ("/", "/api/config", "/missing.js"):
+    connection = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1])
+    connection.request("GET", path)
+    headers = connection.getresponse().headers
+    assert "frame-ancestors 'none'" in headers["Content-Security-Policy"], path
+    assert headers["X-Frame-Options"] == "DENY" and headers["X-Content-Type-Options"] == "nosniff", path
+""")
