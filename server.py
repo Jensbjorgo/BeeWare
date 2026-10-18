@@ -1,11 +1,13 @@
 
 from __future__ import annotations
 
+import bisect
 import csv
 import hashlib
 import heapq
 import json
 import math
+import re
 import secrets
 import sqlite3
 import threading
@@ -30,9 +32,12 @@ DB_FILE = STORAGE_DIR / "beeware.db"
 SIGHTING_TTL_HOURS = 3
 MAX_SIGHTINGS = 500
 STOP_SEARCH_LIMIT = 12
-ROUTE_SEARCH_LIMIT = 12
+ROUTE_SEARCH_LIMIT = 20
 NEARBY_STOP_LIMIT = 6
 NEARBY_RADIUS_KM = 2.0
+# Entur has one station per mode (bus, tram, metro) with the same name, often metres apart;
+# search shows same-named stops this close as one.
+SAME_NAME_RADIUS_KM = 0.3
 EARTH_RADIUS_KM = 6371.0
 SESSION_COOKIE = "beeware_session"
 SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
@@ -48,11 +53,11 @@ STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
 # client cannot push all active reports out of the 500-report store.
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
-# Leaflet comes from unpkg and the map tiles from OpenStreetMap; nothing else is loaded.
+# Leaflet comes from unpkg and the map tiles from Kartverket; nothing else is loaded.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self' https://unpkg.com/leaflet@1.9.4/;"
     " style-src 'self' https://unpkg.com/leaflet@1.9.4/;"
-    " img-src 'self' data: https://tile.openstreetmap.org; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    " img-src 'self' data: https://cache.kartverket.no; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 
 
@@ -92,99 +97,141 @@ def parse_coordinate(value: Any, limit: float) -> float:
     return number
 
 
+def read_gtfs(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    # utf-8-sig: GTFS files may start with a byte order mark.
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        return list(csv.DictReader(handle))
+
+
 class TransitData:
+    """Stops and routes from a GTFS feed, such as Entur's feed for all of Norway.
+
+    Users search for and pick stops: stations (location_type 1) and stops without a station.
+    A station's platforms (quays) are its boarding points, so distances go to the nearest platform.
+    """
+
     def __init__(self, data_dir: Path) -> None:
         self.stops_by_id: dict[str, dict[str, Any]] = {}
+        self.search_index: list[tuple[str, dict[str, Any]]] = []
+        self.points: list[tuple[float, float, str]] = []  # (lat, lon, stop id), sorted by latitude.
+        self.point_lats: list[float] = []
         self.route_index: list[dict[str, str]] = []
-        if (data_dir / "stops.txt").is_file():
-            self._load_stops(data_dir / "stops.txt")
-        if (data_dir / "routes.txt").is_file():
-            self._load_routes(data_dir / "routes.txt")
+        self._load_stops(read_gtfs(data_dir / "stops.txt"))
+        self._load_routes(read_gtfs(data_dir / "routes.txt"), read_gtfs(data_dir / "agency.txt"))
 
-    def _load_stops(self, path: Path) -> None:
-        # utf-8-sig: GTFS files may start with a byte order mark.
-        with path.open(newline="", encoding="utf-8-sig") as handle:
-            for row in csv.DictReader(handle):
-                try:
-                    stop = {
-                        "id": compact_whitespace(row["stop_id"]),
-                        "name": compact_whitespace(row["stop_name"]),
-                        "lat": parse_coordinate(row["stop_lat"], 90),
-                        "lon": parse_coordinate(row["stop_lon"], 180),
-                        "platform": row.get("platform_code") or "",
-                        "description": compact_whitespace(row.get("stop_desc") or ""),
-                    }
-                except (AttributeError, KeyError, TypeError, ValueError):
-                    continue  # Missing columns, short rows and invalid coordinates are skipped.
+    def _load_stops(self, rows: list[dict[str, str]]) -> None:
+        parsed = []
+        for row in rows:
+            try:
+                stop = {
+                    "id": compact_whitespace(row["stop_id"]),
+                    "name": compact_whitespace(row["stop_name"]),
+                    "lat": parse_coordinate(row["stop_lat"], 90),
+                    "lon": parse_coordinate(row["stop_lon"], 180),
+                    "platform": row.get("platform_code") or "",
+                    "description": compact_whitespace(row.get("stop_desc") or ""),
+                }
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue  # Missing columns, short rows and invalid coordinates are skipped.
+            parsed.append((row.get("location_type") or "0", row.get("parent_station") or "", stop))
+        stations = {stop["id"]: stop for kind, _, stop in parsed if kind == "1"}
+        for kind, parent, stop in parsed:
+            if kind == "1" or (kind == "0" and parent not in stations):
                 self.stops_by_id[stop["id"]] = stop
+            if kind == "0":  # Entrances, nodes and boarding areas (2-4) are not boarding points.
+                self.points.append((stop["lat"], stop["lon"], parent if parent in stations else stop["id"]))
+        measured = {stop_id for _, _, stop_id in self.points}
+        self.points += [(s["lat"], s["lon"], s["id"]) for s in stations.values() if s["id"] not in measured]
+        self.points.sort()
+        self.point_lats = [point[0] for point in self.points]
+        self.search_index = [
+            (f"{stop['name']} {stop['description']} {stop['platform']}".casefold(), stop)
+            for stop in self.stops_by_id.values()
+        ]
 
-    def _load_routes(self, path: Path) -> None:
-        seen: set[tuple[str, str]] = set()
-        with path.open(newline="", encoding="utf-8-sig") as handle:
-            for row in csv.DictReader(handle):
-                short_name = compact_whitespace(row.get("route_short_name") or "")
-                long_name = compact_whitespace(row.get("route_long_name") or "")
-                key = (short_name.casefold(), long_name.casefold())
-                if not (short_name or long_name) or key in seen:  # GTFS requires one of the names.
-                    continue
-                seen.add(key)
-                self.route_index.append(
-                    {
-                        "id": row.get("route_id") or "",
-                        "short_name": short_name,
-                        "long_name": long_name,
-                        "label": f"{short_name} {long_name}".strip(),
-                    }
-                )
-        self.route_index.sort(key=lambda item: item["label"])
+    def _load_routes(self, rows: list[dict[str, str]], agencies: list[dict[str, str]]) -> None:
+        agency_names = {row.get("agency_id") or "": compact_whitespace(row.get("agency_name") or "") for row in agencies}
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            short_name = compact_whitespace(row.get("route_short_name") or "")
+            long_name = compact_whitespace(row.get("route_long_name") or "")
+            agency = agency_names.get(row.get("agency_id") or "", "")
+            key = (short_name.casefold(), long_name.casefold(), agency.casefold())
+            if not (short_name or long_name) or key in seen:  # GTFS requires one of the names.
+                continue
+            seen.add(key)
+            name = f"{short_name} {long_name}".strip()
+            self.route_index.append(
+                {
+                    "id": row.get("route_id") or "",
+                    "short_name": short_name,
+                    "long_name": long_name,
+                    "agency": agency,
+                    "label": f"{name} · {agency}" if agency else name,
+                }
+            )
 
-    def search_stops(self, query: str, limit: int = STOP_SEARCH_LIMIT) -> list[dict[str, Any]]:
+    def search_stops(
+        self, query: str, near: tuple[float, float] | None = None, limit: int = STOP_SEARCH_LIMIT
+    ) -> list[dict[str, Any]]:
+        """Exact names first, then names with a word that starts with the query, then the rest.
+
+        Within each group the stops closest to `near` come first, so "sentrum" finds the nearest town.
+        """
         needle = compact_whitespace(query).casefold()
         if len(needle) < 2:
             return []
-
-        matches = sorted(
-            (
-                stop for stop in self.stops_by_id.values()
-                if needle in f"{stop['name']} {stop['description']} {stop['platform']}".casefold()
-            ),
-            key=lambda stop: stop["name"].casefold() != needle,  # Exact names first, before the limit.
-        )
+        word_start = re.compile(r"\b" + re.escape(needle))
+        scored = []
+        for haystack, stop in self.search_index:
+            if needle in haystack:
+                name = stop["name"].casefold()
+                quality = 0 if name == needle else 1 if word_start.search(name) else 2
+                distance = haversine_km(near[0], near[1], stop["lat"], stop["lon"]) if near else 0.0
+                scored.append((quality, distance, name, stop["id"], stop))
         results: list[dict[str, Any]] = []
-        seen: set[tuple[str, float, float]] = set()
-        for stop in matches:
-            key = (stop["name"].casefold(), round(stop["lat"], 5), round(stop["lon"], 5))
-            if key not in seen:
-                seen.add(key)
-                results.append(stop)
-            if len(results) >= limit:
-                break
+        for _, distance, name, _, stop in sorted(scored):
+            if not any(
+                other["name"].casefold() == name
+                and haversine_km(other["lat"], other["lon"], stop["lat"], stop["lon"]) < SAME_NAME_RADIUS_KM
+                for other in results
+            ):
+                results.append({**stop, "distance_m": round(distance * 1000)} if near else stop)
+                if len(results) == limit:
+                    break
         return results
 
     def search_routes(self, query: str, limit: int = ROUTE_SEARCH_LIMIT) -> list[dict[str, str]]:
+        """Line numbers that match exactly first, then those that start with the query."""
         needle = compact_whitespace(query).casefold()
-        if not needle:
-            return self.route_index[:limit]
 
-        results = []
-        for route in self.route_index:
-            haystack = f"{route['short_name']} {route['long_name']}".casefold()
-            if needle in haystack:
-                results.append(route)
-            if len(results) >= limit:
-                break
-        return results
+        def rank(route: dict[str, str]) -> tuple[int, str]:
+            short_name = route["short_name"].casefold()
+            return (0 if short_name == needle else 1 if short_name.startswith(needle) else 2, route["label"])
+
+        matches = [route for route in self.route_index if needle in route["label"].casefold()]
+        return heapq.nsmallest(limit, matches, key=rank)
 
     def find_nearby_stops(
         self, lat: float, lon: float, limit: int = NEARBY_STOP_LIMIT
     ) -> list[dict[str, Any]]:
-        # ponytail: scans every stop; add a spatial index if a national feed makes this slow.
-        distances = ((haversine_km(lat, lon, stop["lat"], stop["lon"]), stop) for stop in self.stops_by_id.values())
-        nearest = heapq.nsmallest(limit, distances, key=lambda item: item[0])
+        # Only boarding points inside this latitude and longitude band can be within the radius.
+        # ponytail: the band ignores the 180th meridian, which no Norwegian stop is near.
+        dlat = math.degrees(NEARBY_RADIUS_KM / EARTH_RADIUS_KM)
+        dlon = dlat / math.cos(math.radians(min(abs(lat) + dlat, 89.9)))
+        first = bisect.bisect_left(self.point_lats, lat - dlat)
+        last = bisect.bisect_right(self.point_lats, lat + dlat)
+        nearest: dict[str, float] = {}
+        for point_lat, point_lon, stop_id in self.points[first:last]:
+            if abs(point_lon - lon) <= dlon:
+                distance = haversine_km(lat, lon, point_lat, point_lon)
+                if distance <= NEARBY_RADIUS_KM and distance < nearest.get(stop_id, math.inf):
+                    nearest[stop_id] = distance
         return [
-            {**stop, "distance_m": int(distance_km * 1000)}
-            for distance_km, stop in nearest
-            if distance_km <= NEARBY_RADIUS_KM
+            {**self.stops_by_id[stop_id], "distance_m": round(distance * 1000)}
+            for stop_id, distance in heapq.nsmallest(limit, nearest.items(), key=lambda item: item[1])
         ]
 
 
@@ -490,8 +537,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/stops/search":
-            query = params.get("q", [""])[0]
-            self.send_json({"items": transit_data.search_stops(query)})
+            try:
+                near = (parse_coordinate(params["lat"][0], 90), parse_coordinate(params["lon"][0], 180))
+            except (KeyError, ValueError):
+                near = None  # The position only ranks the results; without it they are sorted by name.
+            self.send_json({"items": transit_data.search_stops(params.get("q", [""])[0], near)})
             return
 
         if parsed.path == "/api/stops/nearby":

@@ -3,11 +3,14 @@ const map = L.map("map", {
   zoomControl: true,
   doubleClickZoom: false,
 });
-map.setView([58.1467, 7.9956], 11);
+map.setView([59.9139, 10.7522], 12); // Oslo until GPS finds the user.
 
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-bidragsytere',
+// Kartverket's official topographic map of Norway; its cache serves zoom levels up to 18.
+L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png", {
+  maxZoom: 18,
+  attribution:
+    '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
+    '<a href="https://data.norge.no/nlod/no/2.0">Entur (NLOD)</a>',
 }).addTo(map);
 
 const state = {
@@ -101,6 +104,10 @@ function formatAge(isoString) {
 
 function confirmations(count) {
   return `${count} ${count === 1 ? "bekreftelse" : "bekreftelser"}`;
+}
+
+function formatDistance(metres) {
+  return metres < 1000 ? `${metres} m` : `${(metres / 1000).toFixed(1).replace(".", ",")} km`;
 }
 
 function escapeHtml(value) {
@@ -241,7 +248,7 @@ function renderFeed(items) {
           ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
           <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
           <div class="feed-actions">
-            <span class="tiny">${item.distance_to_stop_m != null ? `${item.distance_to_stop_m} m fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
+            <span class="tiny">${item.distance_to_stop_m != null ? `${formatDistance(item.distance_to_stop_m)} fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
             <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
               ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
             </button>
@@ -331,7 +338,9 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
       return;
     }
     const [closest] = payload.items;
-    nearestStop.textContent = closest ? `${closest.name} (${closest.distance_m} m)` : "Fant ingen holdeplass innen 2 km.";
+    nearestStop.textContent = closest
+      ? `${closest.name} (${formatDistance(closest.distance_m)})`
+      : "Fant ingen holdeplass innen 2 km.";
     // Fill in the stop unless the user has started typing one meanwhile.
     if (closest && !stopInput.value) {
       stopInput.value = closest.name;
@@ -342,17 +351,28 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
   }
 }
 
-function renderOptions(datalistEl, labels) {
-  datalistEl.innerHTML = labels.map((label) => `<option value="${escapeHtml(label)}"></option>`).join("");
+// `labels` adds a description shown next to each value, such as the operator of a line.
+function renderOptions(datalistEl, values, labels = values) {
+  datalistEl.innerHTML = values
+    .map((value, index) => {
+      const label = labels[index] === value ? "" : ` label="${escapeHtml(labels[index])}"`;
+      return `<option value="${escapeHtml(value)}"${label}></option>`;
+    })
+    .join("");
 }
 
-// Stops that share a name get their platform, or else their ID, so each option is one stop.
+// Stops that share a name, such as "Sentrum" in many towns, get their platform and distance,
+// or else their ID, so each option is one stop.
 function stopChoices(stops) {
   const count = (values, value) => values.filter((other) => other === value).length;
   const names = stops.map((stop) => stop.name);
-  const labels = stops.map((stop) =>
-    count(names, stop.name) > 1 && stop.platform ? `${stop.name} (plattform ${stop.platform})` : stop.name
-  );
+  const labels = stops.map((stop) => {
+    const details = [
+      stop.platform && `plattform ${stop.platform}`,
+      stop.distance_m != null && formatDistance(stop.distance_m),
+    ].filter(Boolean);
+    return count(names, stop.name) > 1 && details.length ? `${stop.name} (${details.join(", ")})` : stop.name;
+  });
   return stops.map((stop, index) => ({
     stop,
     label: count(labels, labels[index]) > 1 ? `${stop.name} (${stop.id})` : labels[index],
@@ -435,7 +455,9 @@ async function searchStop() {
     return;
   }
   try {
-    const payload = await fetchLatest("stop", `/api/stops/search?q=${encodeURIComponent(query)}`);
+    // Results closest to what the map shows come first.
+    const { lat, lng } = map.wrapLatLng(map.getCenter());
+    const payload = await fetchLatest("stop", `/api/stops/search?q=${encodeURIComponent(query)}&lat=${lat}&lon=${lng}`);
     if (!payload) {
       return;
     }
@@ -457,7 +479,8 @@ routeInput.addEventListener("input", async () => {
   try {
     const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
     if (payload) {
-      renderOptions(routeOptions, payload.items.map((item) => item.short_name || item.long_name));
+      const values = payload.items.map((item) => item.short_name || item.long_name);
+      renderOptions(routeOptions, values, payload.items.map((item) => item.label));
     }
   } catch (error) {
     renderOptions(routeOptions, []);

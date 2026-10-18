@@ -84,6 +84,52 @@ assert data.find_nearby_stops(58.15, 8.0)[0]['distance_m'] == 0
         })
 
 
+    def test_national_feed_with_stations_platforms_and_agencies(self):
+        # Entur's feed for all of Norway: stations (type 1) group their platforms (type 0).
+        stops = """stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,platform_code
+NSR:StopPlace:1,Jernbanetorget,59.9115,10.7500,1,,
+NSR:Quay:11,Jernbanetorget,59.9110,10.7510,0,NSR:StopPlace:1,A
+NSR:Quay:12,Jernbanetorget,59.9120,10.7490,0,NSR:StopPlace:1,B
+NSR:Entrance:9,Inngang,59.9111,10.7511,2,NSR:StopPlace:1,
+NSR:StopPlace:2,Sentrum,63.4305,10.3951,1,,
+NSR:Quay:21,Sentrum,63.4300,10.3950,0,NSR:StopPlace:2,
+NSR:StopPlace:3,Sentrum,59.9130,10.7400,1,,
+NSR:StopPlace:4,Sentrum,59.9131,10.7402,1,,
+NSR:StopPlace:5,Lørenskog sentrum,59.9270,10.9550,1,,
+NSR:StopPlace:6,Sentrumsgården,59.9135,10.7410,1,,
+NSR:StopPlace:7,Sentrum fergeleie,59.2000,10.4000,1,,
+"""
+        routes = """route_id,agency_id,route_short_name,route_long_name
+RUT:Line:31,RUT,31,Tonsenhagen - Snaroya
+ATB:Line:31,ATB,31,Lade - Tiller
+RUT:Line:310,RUT,310,Ski - Oslo
+"""
+        agencies = "agency_id,agency_name\nRUT,Ruter\nATB,AtB\n"
+        run_in_copy(self, """
+data = server.transit_data
+assert sorted(data.stops_by_id) == [f"NSR:StopPlace:{i}" for i in range(1, 8)]
+assert [s["id"] for s in data.search_stops("jernbanetorget")] == ["NSR:StopPlace:1"]
+trondheim, oslo = (63.43, 10.39), (59.91, 10.75)
+# Exact names first, then names with a word starting "sentrum" by distance, then the rest.
+# The two Oslo stations named Sentrum, a few metres apart, show as one.
+assert [s["id"] for s in data.search_stops("sentrum", oslo)] == [
+    "NSR:StopPlace:4", "NSR:StopPlace:2", "NSR:StopPlace:6", "NSR:StopPlace:5", "NSR:StopPlace:7",
+], data.search_stops("sentrum", oslo)
+first, second = [s["id"] for s in data.search_stops("sentrum", trondheim)][:2]
+assert first == "NSR:StopPlace:2" and second in {"NSR:StopPlace:3", "NSR:StopPlace:4"}, (first, second)
+assert "distance_m" not in data.search_stops("sentrum")[0]
+# Distances go to the nearest platform, not the station's centre or an entrance.
+nearest = data.find_nearby_stops(59.9110, 10.7510)
+assert [(s["id"], s["distance_m"]) for s in nearest[:1]] == [("NSR:StopPlace:1", 0)], nearest
+assert [s["id"] for s in data.find_nearby_stops(59.9130, 10.7400)][:1] == ["NSR:StopPlace:3"]
+labels = [r["label"] for r in data.search_routes("31")]
+assert labels == ["31 Lade - Tiller · AtB", "31 Tonsenhagen - Snaroya · Ruter", "310 Ski - Oslo · Ruter"], labels
+items = request("GET", "/api/stops/search?q=sentrum&lat=63.43&lon=10.39")[1]["items"]
+assert items[0]["id"] == "NSR:StopPlace:2" and items[0]["distance_m"] == 260, items
+assert request("GET", "/api/stops/search?q=sentrum&lat=nan&lon=10")[0] == 200
+""", data={"stops.txt": stops, "routes.txt": routes, "agency.txt": agencies})
+
+
 class RegressionTests(unittest.TestCase):
     def test_concurrent_writes_keep_every_report_and_user(self):
         run_in_copy(self, """
@@ -219,9 +265,9 @@ assert [stop["id"] for stop in data.find_nearby_stops(58.15, 8.0, limit=1)] == [
 def report(**fields):
     item = request("POST", "/api/sightings", {"lat": 58.15, "lon": 8.0, **fields})[1]
     return item["stop_id"], item["stop_name"], item["distance_to_stop_m"]
-assert report() == ("east", "Ost", 586)
-assert report(stop_name="Mitt sted") == ("", "Mitt sted", 586)
-assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 586)
+assert report() == ("east", "Ost", 587)
+assert report(stop_name="Mitt sted") == ("", "Mitt sted", 587)
+assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 587)
 """, data={"stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nnorth,Nord,58.165,8.0\neast,Ost,58.15,8.01\nfar,Fjern,59.0,8.0\n"})
 
     def test_every_response_refuses_framing_and_sniffing(self):

@@ -39,7 +39,10 @@ async function setup(route = () => undefined) {
   let intervals = 0;
   const context = vm.createContext({
     L: {
-      map: () => ({ on() {}, setView() {}, flyTo() {}, panTo() {} }),
+      map: () => ({
+        on() {}, setView() {}, flyTo() {}, panTo() {},
+        getCenter: () => ({ lat: 59.91, lng: 10.75 }), wrapLatLng: (point) => point,
+      }),
       tileLayer: layer, layerGroup: layer, marker: layer, circle: layer,
       divIcon: (options) => options,
     },
@@ -160,11 +163,15 @@ test("stops sharing a name get distinct options, and picking one selects that st
     { id: "A", name: "Sentrum", platform: "1", lat: 58, lon: 8 },
     { id: "B", name: "Sentrum", platform: "2", lat: 59, lon: 9 },
     { id: "C", name: "Torget", platform: "", lat: 57, lon: 7 },
+    { id: "D", name: "Skolen", platform: "", lat: 59.9, lon: 10.7, distance_m: 850 },
+    { id: "E", name: "Skolen", platform: "", lat: 63.4, lon: 10.4, distance_m: 391507 },
   ] }) : undefined);
   const stop = app.element("#stopInput");
   stop.value = "Sentrum";
   await stop.input();
-  assert.match(app.element("#stopOptions").innerHTML, /Sentrum \(plattform 1\).*Sentrum \(plattform 2\).*"Torget"/s);
+  const options = app.element("#stopOptions").innerHTML;
+  assert.match(options, /Sentrum \(plattform 1\).*Sentrum \(plattform 2\).*"Torget"/s);
+  assert.match(options, /"Skolen \(850 m\)".*"Skolen \(391,5 km\)"/s);
   stop.value = "Sentrum (plattform 2)";
   await stop.input();
   assert.equal(app.state.selectedLatLng.lat, 59);
@@ -356,4 +363,22 @@ test("a late route-search error does not replace a published report's message", 
   answerRoutes(reply({ error: "Failed to fetch" }, false));
   await search;
   assert.equal(app.element("#formStatus").textContent, "Observasjonen er publisert anonymt.");
+});
+
+test("stop searches send the map centre, and line options name the operator", async () => {
+  const urls = [];
+  const app = await setup((url) => {
+    urls.push(url);
+    if (url.startsWith("/api/routes")) {
+      return reply({ items: [{ short_name: "31", long_name: "Lade - Tiller", label: "31 Lade - Tiller · AtB" }] });
+    }
+  });
+  const stop = app.element("#stopInput");
+  stop.value = "Sentrum";
+  await stop.input();
+  assert.ok(urls.includes("/api/stops/search?q=Sentrum&lat=59.91&lon=10.75"), urls);
+  const route = app.element("#routeInput");
+  route.value = "31";
+  await route.input();
+  assert.equal(app.element("#routeOptions").innerHTML, '<option value="31" label="31 Lade - Tiller · AtB"></option>');
 });
