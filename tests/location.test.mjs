@@ -318,3 +318,42 @@ test("publishing waits for a stop search started while it was already waiting", 
   await sent;
   assert.deepEqual([posted.lat, posted.lon, posted.stop_name], [60.39, 5.32, "Bergen"]);
 });
+
+test("the first GPS fix leaves a stop search the user already started alone", async () => {
+  let answerSearch;
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return new Promise((resolve) => { answerSearch = resolve; });
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  const stop = app.element("#stopInput");
+  stop.value = "Bergen";
+  stop.input();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  app.current(58.1, 7.9);  // The automatic GPS lookup answers before the search.
+  assert.equal(stop.value, "Bergen");
+  answerSearch(reply({ items: [{ id: "BGO", name: "Bergen", lat: 60.39, lon: 5.32 }] }));
+  await sent;
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_name], [60.39, 5.32, "Bergen"]);
+});
+
+test("a late route-search error does not replace a published report's message", async () => {
+  let answerRoutes;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/routes")) return new Promise((resolve) => { answerRoutes = resolve; });
+    if (options?.method === "POST") return reply({ reporter: "Anonym" });
+  });
+  app.updateSelection(58, 8);
+  for (const id of ["#stopInput", "#noteInput"]) app.element(id).value = "";
+  const route = app.element("#routeInput");
+  route.value = "M1";
+  const search = route.input();
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  answerRoutes(reply({ error: "Failed to fetch" }, false));
+  await search;
+  assert.equal(app.element("#formStatus").textContent, "Observasjonen er publisert anonymt.");
+});

@@ -119,6 +119,13 @@ function setStatus(message, type = "") {
   formStatus.className = type ? `status ${type}` : "status";
 }
 
+// For answers that can arrive late, such as GPS or suggestions: the returned function shows a
+// message only if no newer one, such as a published report, was shown in the meantime.
+function lateStatus() {
+  const before = statusVersion;
+  return (message, type) => statusVersion === before && setStatus(message, type);
+}
+
 function setAuthStatus(message, type = "") {
   authStatus.textContent = message;
   authStatus.className = type ? `status ${type}` : "status";
@@ -311,11 +318,13 @@ const showLoadError = (error) => {
   feedStatus.textContent = error.message;
 };
 
-async function loadNearbyStop(lat, lon) {
-  latest.stop++; // A newer position also outdates pending stop searches.
+async function loadNearbyStop(lat, lon, replaceStop = true) {
+  if (replaceStop) {
+    latest.stop++; // A newer position also outdates pending stop searches.
+    stopInput.value = "";
+    stopInput.dataset.stopId = "";
+  }
   nearestStop.textContent = "Laster...";
-  stopInput.value = "";
-  stopInput.dataset.stopId = "";
   try {
     const payload = await fetchLatest("nearby", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
     if (!payload) {
@@ -363,7 +372,8 @@ function handleLocationUpdate(position, shouldCenter = false, selectLocation = f
   updateCurrentLocation(latitude, longitude, accuracy);
   if (selectLocation || !state.selectedLatLng) {
     updateSelection(latitude, longitude);
-    loadNearbyStop(latitude, longitude);
+    // The automatic first fix leaves a stop the user is already typing, and its search, alone.
+    loadNearbyStop(latitude, longitude, selectLocation || !stopInput.value);
   }
   if (shouldCenter || !state.hasAutoCentered) {
     map.flyTo([latitude, longitude], 14);
@@ -379,9 +389,7 @@ function startLocationTracking(selectLocation = false) {
 
   locateBtn.disabled = true;
   const selectionBefore = state.selectedLatLng;
-  // GPS can answer late; its messages must not replace a newer one, such as a failed publish.
-  const statusBefore = statusVersion;
-  const setGpsStatus = (message, type) => statusVersion === statusBefore && setStatus(message, type);
+  const setGpsStatus = lateStatus();
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
@@ -445,6 +453,7 @@ async function searchStop() {
 }
 
 routeInput.addEventListener("input", async () => {
+  const setRouteStatus = lateStatus();
   try {
     const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
     if (payload) {
@@ -452,7 +461,7 @@ routeInput.addEventListener("input", async () => {
     }
   } catch (error) {
     renderOptions(routeOptions, []);
-    setStatus(error.message, "error");
+    setRouteStatus(error.message, "error");
   }
 });
 
