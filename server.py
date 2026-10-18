@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterator
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timezone
@@ -50,7 +50,7 @@ MAX_BODY_BYTES = 4096
 REQUEST_TIMEOUT_SECONDS = 10
 MAX_CONNECTIONS = 64
 STOP_NAME_MAX = 80
-ROUTE_MAX = 80
+ROUTE_MAX = 100
 NOTE_MAX = 160
 STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
@@ -77,8 +77,8 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     c = (math.cos(half_dlat) * math.cos(half_dlon)) ** 2 + (math.sin(mid) * math.sin(half_dlon)) ** 2
     if s == 0:
         return 0.0
-    if c < 1e-9:  # Nearly opposite points, where the formula breaks down.
-        return math.pi * WGS84_A_KM
+    if c < 1e-9:  # Nearly opposite points, where the formula breaks down: half a meridian apart.
+        return 20003.931458
     omega = math.atan(math.sqrt(s / c))
     r = math.sqrt(s * c) / omega
     h1 = (3 * r - 1) / (2 * c)
@@ -189,6 +189,12 @@ class TransitData:
                     "label": f"{name} · {agency}" if agency else name,
                 }
             )
+        # What a report says: number and operator, or the full label where an operator has two lines
+        # with the same number, such as two line 48s around Kristiansand.
+        numbers = Counter((route["short_name"].casefold(), route["agency"].casefold()) for route in self.route_index)
+        for route in self.route_index:
+            unique = route["short_name"] and numbers[route["short_name"].casefold(), route["agency"].casefold()] == 1
+            route["value"] = " · ".join(filter(None, (route["short_name"], route["agency"]))) if unique else route["label"]
 
     def search_stops(
         self, query: str, near: tuple[float, float] | None = None, limit: int = STOP_SEARCH_LIMIT

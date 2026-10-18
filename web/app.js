@@ -54,6 +54,71 @@ const authContent = document.querySelector("#authContent");
 const userLevel = document.querySelector("#userLevel");
 const userXp = document.querySelector("#userXp");
 
+// A suggestion list under a text field, used instead of <datalist>: browsers hide every datalist
+// option that does not contain the typed text, such as a stop found by its street or "31 Ruter".
+// `choose` gets the picked item; the returned function shows new items, or closes the list with [].
+function suggestionList(input, list, choose) {
+  let items = [];
+  let active = -1;
+  function render(index) {
+    active = index;
+    list.hidden = items.length === 0;
+    input.setAttribute("aria-expanded", String(items.length > 0));
+    input.setAttribute("aria-activedescendant", active >= 0 ? `${list.id}-${active}` : "");
+    list.innerHTML = items
+      .map((item, i) => `<li id="${list.id}-${i}" role="option" data-index="${i}" aria-selected="${i === active}">` +
+        `${escapeHtml(item.label)}</li>`)
+      .join("");
+    list.querySelector(`[aria-selected="true"]`)?.scrollIntoView?.({ block: "nearest" });
+  }
+  function show(newItems) {
+    items = newItems;
+    render(-1);
+  }
+  function pick(index) {
+    const item = items[index];
+    show([]);
+    choose(item);
+  }
+  input.addEventListener("keydown", (event) => {
+    if (!items.length) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      render((active + 1) % items.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      render(active > 0 ? active - 1 : items.length - 1);
+    } else if (event.key === "Enter" && active >= 0) {
+      event.preventDefault(); // Picks the option instead of publishing the report.
+      pick(active);
+    } else if (event.key === "Escape") {
+      show([]);
+    }
+  });
+  // Keeps focus in the field while an option is clicked, so the blur below does not close the list first.
+  list.addEventListener("mousedown", (event) => event.preventDefault());
+  list.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-index]");
+    if (option) {
+      pick(Number(option.dataset.index));
+    }
+  });
+  input.addEventListener("blur", () => show([]));
+  return show;
+}
+
+const showStopChoices = suggestionList(stopInput, stopOptions, (choice) => {
+  latest.stop++;
+  stopInput.value = choice.label;
+  selectStop(choice);
+});
+const showRouteChoices = suggestionList(routeInput, routeOptions, (route) => {
+  latest.route++;
+  routeInput.value = route.value;
+});
+
 async function fetchJson(url, options) {
   const response = await fetch(url, {
     credentials: "same-origin",
@@ -328,7 +393,8 @@ const showLoadError = (error) => {
 
 async function loadNearbyStop(lat, lon, replaceStop = true) {
   if (replaceStop) {
-    latest.stop++; // A newer position also outdates pending stop searches.
+    latest.stop++; // A newer position also outdates pending stop searches and their suggestions.
+    showStopChoices([]);
     stopInput.value = "";
     stopInput.dataset.stopId = "";
   }
@@ -350,16 +416,6 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
   } catch (error) {
     nearestStop.textContent = error.message;
   }
-}
-
-// `labels` adds a description shown next to each value, such as the operator of a line.
-function renderOptions(datalistEl, values, labels = values) {
-  datalistEl.innerHTML = values
-    .map((value, index) => {
-      const label = labels[index] === value ? "" : ` label="${escapeHtml(labels[index])}"`;
-      return `<option value="${escapeHtml(value)}"${label}></option>`;
-    })
-    .join("");
 }
 
 // Stops that share a name, such as "Sentrum" in many towns or the bus, tram and metro stations at
@@ -442,7 +498,6 @@ function startLocationTracking(selectLocation = false) {
   );
 }
 
-let shownStops = [];
 // Publishing waits for this, since a search may still move the report position.
 let stopSearch = Promise.resolve();
 
@@ -451,13 +506,6 @@ stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 async function searchStop() {
   const query = stopInput.value.trim();
   stopInput.dataset.stopId = "";
-  // A picked option is matched against the list it came from; its label may not be searchable.
-  const picked = shownStops.find((choice) => choice.label === query);
-  if (picked) {
-    latest.stop++;
-    selectStop(picked);
-    return;
-  }
   try {
     // Results closest to what the map shows come first.
     const { lat, lng } = map.wrapLatLng(map.getCenter());
@@ -465,15 +513,15 @@ async function searchStop() {
     if (!payload) {
       return;
     }
-    shownStops = stopChoices(payload.items);
-    renderOptions(stopOptions, shownStops.map((choice) => choice.label));
-    const exact = shownStops.find((choice) => choice.label === query);
+    const choices = stopChoices(payload.items);
+    showStopChoices(choices);
+    // A fully typed name picks its stop when no other stop in the list shares it.
+    const exact = choices.find((choice) => choice.label === query);
     if (exact) {
       selectStop(exact);
     }
   } catch (error) {
-    shownStops = [];
-    renderOptions(stopOptions, []);
+    showStopChoices([]);
     nearestStop.textContent = error.message;
   }
 }
@@ -483,14 +531,10 @@ routeInput.addEventListener("input", async () => {
   try {
     const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
     if (payload) {
-      // The operator stays in the value, since line 1 in Oslo and line 1 in Trondheim are different lines.
-      const values = payload.items.map((item) =>
-        [item.short_name || item.long_name, item.agency].filter(Boolean).join(" · ")
-      );
-      renderOptions(routeOptions, values, payload.items.map((item) => item.label));
+      showRouteChoices(payload.items); // Each line's value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
     }
   } catch (error) {
-    renderOptions(routeOptions, []);
+    showRouteChoices([]);
     setRouteStatus(error.message, "error");
   }
 });

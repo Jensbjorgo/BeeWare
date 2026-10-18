@@ -13,6 +13,7 @@ async function setup(route = () => undefined) {
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, {
+      id: selector.slice(1),
       classList: { toggle() {} },
       dataset: {},
       addEventListener(event, handler) { this[event] = handler; },
@@ -158,7 +159,7 @@ test("a late stop-search answer cannot move the report position", async () => {
   assert.equal(stop.dataset.stopId, "B");
 });
 
-test("stops sharing a name get distinct options, and picking one selects that stop", async () => {
+test("stops sharing a name get distinct suggestions, and the keyboard picks one", async () => {
   const app = await setup((url) => url.startsWith("/api/stops/search") ? reply({ items: [
     { id: "A", name: "Sentrum", platform: "1", lat: 58, lon: 8 },
     { id: "B", name: "Sentrum", platform: "2", lat: 59, lon: 9 },
@@ -171,14 +172,27 @@ test("stops sharing a name get distinct options, and picking one selects that st
   const stop = app.element("#stopInput");
   stop.value = "Sentrum";
   await stop.input();
-  const options = app.element("#stopOptions").innerHTML;
-  assert.match(options, /Sentrum \(plattform 1\).*Sentrum \(plattform 2\).*"Torget"/s);
-  assert.match(options, /"Skolen \(850 m\)".*"Skolen \(391,5 km\)"/s);
-  assert.match(options, /"Jernbanetorget \(T-bane, 120 m\)".*"Jernbanetorget \(buss, foran Oslo S, 180 m\)"/s);
-  stop.value = "Sentrum (plattform 2)";
-  await stop.input();
+  const list = app.element("#stopOptions");
+  assert.match(list.innerHTML, />Sentrum \(plattform 1\)<.*>Sentrum \(plattform 2\)<.*>Torget</s);
+  assert.match(list.innerHTML, />Skolen \(850 m\)<.*>Skolen \(391,5 km\)</s);
+  assert.match(list.innerHTML, />Jernbanetorget \(T-bane, 120 m\)<.*>Jernbanetorget \(buss, foran Oslo S, 180 m\)</s);
+  assert.equal(list.hidden, false);
+  const key = (name) => stop.keydown({ key: name, preventDefault() {} });
+  key("ArrowUp");
+  assert.match(list.innerHTML, /aria-selected="true">Jernbanetorget \(buss/);  // Up from the field wraps to the last.
+  key("ArrowDown");
+  key("ArrowDown");
+  key("Enter");
+  assert.equal(stop.value, "Sentrum (plattform 2)");
   assert.equal(app.state.selectedLatLng.lat, 59);
   assert.equal(stop.dataset.stopId, "B");
+  assert.equal(list.hidden, true);
+  // Picking a spot on the map closes old suggestions, which carry platforms near the old map centre.
+  stop.value = "Sentrum";
+  await stop.input();
+  await app.loadNearbyStop(58, 8);
+  assert.equal(list.hidden, true);
+  assert.equal(list.innerHTML, "");
 });
 
 test("a late /api/me answer cannot log the user back in after logout", async () => {
@@ -368,14 +382,14 @@ test("a late route-search error does not replace a published report's message", 
   assert.equal(app.element("#formStatus").textContent, "Observasjonen er publisert anonymt.");
 });
 
-test("stop searches send the map centre, and line options name the operator", async () => {
+test("stop searches send the map centre, and every line found is offered with its operator", async () => {
   const urls = [];
   const app = await setup((url) => {
     urls.push(url);
     if (url.startsWith("/api/routes")) {
       return reply({ items: [
-        { short_name: "31", long_name: "Lade - Tiller", agency: "AtB", label: "31 Lade - Tiller · AtB" },
-        { short_name: "", long_name: "Bastø", agency: "", label: "Bastø" },
+        { label: "31 Snarøya - Grorud · Ruter", value: "31 · Ruter" },
+        { label: "48 Høllen - Nodelandsheia · Agder", value: "48 Høllen - Nodelandsheia · Agder" },
       ] });
     }
   });
@@ -384,11 +398,16 @@ test("stop searches send the map centre, and line options name the operator", as
   await stop.input();
   assert.ok(urls.includes("/api/stops/search?q=Sentrum&lat=59.91&lon=10.75"), urls);
   const route = app.element("#routeInput");
-  route.value = "31";
+  // A browser datalist would hide both, since neither contains the typed "31 Ruter".
+  route.value = "31 Ruter";
   await route.input();
-  // The operator is part of the value, so the published line says which one it was.
+  const list = app.element("#routeOptions");
   assert.equal(
-    app.element("#routeOptions").innerHTML,
-    '<option value="31 · AtB" label="31 Lade - Tiller · AtB"></option><option value="Bastø"></option>'
+    list.innerHTML,
+    '<li id="routeOptions-0" role="option" data-index="0" aria-selected="false">31 Snarøya - Grorud · Ruter</li>' +
+    '<li id="routeOptions-1" role="option" data-index="1" aria-selected="false">48 Høllen - Nodelandsheia · Agder</li>'
   );
+  list.click({ target: { closest: () => ({ dataset: { index: "1" } }) } });
+  assert.equal(route.value, "48 Høllen - Nodelandsheia · Agder");  // The value says which line 48 it was.
+  assert.equal(list.hidden, true);
 });

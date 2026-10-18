@@ -104,8 +104,10 @@ NSR:StopPlace:8,Å,68.7836,17.7842,1,,,3
 RUT:Line:31,RUT,31,Tonsenhagen - Snaroya
 ATB:Line:31,ATB,31,Lade - Tiller
 RUT:Line:310,RUT,310,Ski - Oslo
+AKT:Line:1,AKT,48,Høllen - Nodelandsheia
+AKT:Line:2,AKT,48,Tangvall - Hortemo
 """
-        agencies = "agency_id,agency_name\nRUT,Ruter\nATB,AtB\n"
+        agencies = "agency_id,agency_name\nRUT,Ruter\nATB,AtB\nAKT,Agder\n"
         run_in_copy(self, """
 data = server.transit_data
 assert sorted(data.stops_by_id) == [f"NSR:StopPlace:{i}" for i in range(1, 9)]
@@ -139,6 +141,9 @@ assert labels == ["31 Lade - Tiller · AtB", "31 Tonsenhagen - Snaroya · Ruter"
 assert [r["label"] for r in data.search_routes("31 ruter")] == ["31 Tonsenhagen - Snaroya · Ruter", "310 Ski - Oslo · Ruter"]
 assert [r["label"] for r in data.search_routes("31 · AtB")] == ["31 Lade - Tiller · AtB"]
 assert data.search_routes(" ") == []
+# A report names the line by number and operator, or in full where one operator has two line 48s.
+assert [r["value"] for r in data.search_routes("31")] == ["31 · AtB", "31 · Ruter", "310 · Ruter"]
+assert [r["value"] for r in data.search_routes("48")] == ["48 Høllen - Nodelandsheia · Agder", "48 Tangvall - Hortemo · Agder"]
 items = request("GET", "/api/stops/search?q=sentrum&lat=63.43&lon=10.39")[1]["items"]
 assert items[0]["id"] == "NSR:StopPlace:2" and items[0]["distance_m"] == 250, items  # To platform 21.
 assert request("GET", "/api/stops/search?q=sentrum&lat=nan&lon=10")[0] == 200
@@ -287,7 +292,7 @@ assert report(stop_name="Feil navn", stop_id="north") == ("north", "Nord", 589)
 # Within centimetres of Vincenty's WGS84 distances: 1826.667 m at 71° N and 393.270 km from Oslo to Trondheim.
 assert abs(server.distance_km(71.1, 25.76, 71.11, 25.8) - 1.826667) < 0.00005
 assert abs(server.distance_km(59.911, 10.75, 63.4361, 10.4011) - 393.270) < 0.005
-assert server.distance_km(58.059, 8, -58.059, -172) > 19900  # Nearly opposite points must not crash.
+assert abs(server.distance_km(58.059, 8, -58.059, -172) - 20003.931) < 0.001  # Opposite points: half a meridian.
 """, data={"stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nnorth,Nord,58.165,8.0\neast,Ost,58.15,8.01\nfar,Fjern,59.0,8.0\n"})
 
     def test_every_response_refuses_framing_and_sniffing(self):

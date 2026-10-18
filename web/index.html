@@ -32,15 +32,15 @@
           <form id="reportForm">
             <label>
               Holdeplass
-              <input id="stopInput" name="stop_name" type="text" placeholder="Søk holdeplass eller trykk i kartet" list="stopOptions" autocomplete="off" maxlength="80" />
-              <datalist id="stopOptions"></datalist>
+              <input id="stopInput" name="stop_name" type="text" placeholder="Søk holdeplass eller trykk i kartet" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="stopOptions" autocomplete="off" maxlength="80" />
             </label>
+            <ul id="stopOptions" class="suggestions" role="listbox" aria-label="Holdeplasser" hidden></ul>
 
             <label>
               Busslinje
-              <input id="routeInput" name="route" type="text" placeholder="For eksempel 100 eller M1" list="routeOptions" autocomplete="off" maxlength="80" />
-              <datalist id="routeOptions"></datalist>
+              <input id="routeInput" name="route" type="text" placeholder="For eksempel 100 eller M1" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="routeOptions" autocomplete="off" maxlength="100" />
             </label>
+            <ul id="routeOptions" class="suggestions" role="listbox" aria-label="Linjer" hidden></ul>
 
             <label>
               Notat

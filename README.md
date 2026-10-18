@@ -10,8 +10,9 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Dekker fastlands-Norge med Kartverkets topografiske kart og Enturs nasjonale holdeplass- og linjedata.
 - Henter nærmeste holdeplass innen 2 km, målt til nærmeste plattform.
 - Søker holdeplasser med eksakte navn først og deretter de nærmeste treffene.
-- Søker linjer med nummer, navn og operatør (for eksempel «31 AtB»), og operatøren blir med i
-  observasjonen («31 · AtB»).
+- Søker linjer med nummer, navn og operatør (for eksempel «31 Ruter»). Observasjonen får nummer og
+  operatør («31 · Ruter»), eller hele linjenavnet når operatøren har flere linjer med samme nummer.
+- Viser alle treff i en egen forslagsliste som kan brukes med piltaster, Enter og Escape.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
 - Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
 - Deler observasjoner mellom brukere som åpner samme server.

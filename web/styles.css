@@ -146,6 +146,33 @@ textarea:focus {
   outline-offset: 1px;
 }
 
+.suggestions {
+  margin: -6px 0 0;
+  padding: 4px;
+  max-height: 16rem;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid rgba(17, 63, 138, 0.16);
+  border-radius: 14px;
+  background: #fffdf9;
+}
+
+.suggestions[hidden] {
+  display: none;
+}
+
+.suggestions li {
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.suggestions li:hover,
+.suggestions li[aria-selected="true"] {
+  background: var(--accent-soft);
+  outline: 2px solid var(--accent-deep);
+}
+
 button {
   border: 0;
   border-radius: 999px;
