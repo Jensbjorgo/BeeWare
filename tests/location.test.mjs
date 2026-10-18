@@ -52,7 +52,12 @@ async function setup(route = () => undefined) {
       getCurrentPosition(callback) { currentCallback = callback; },
       watchPosition(callback) { watchCallback = callback; watches++; return 0; },
     } },
-    fetch: (url, options) => route(url, options) ?? reply({ ttl_hours: 3, user: null, stats: null, items: [] }),
+    // Like the browser, an aborted request rejects at once even if its answer never comes.
+    fetch: (url, options) => Promise.race([
+      route(url, options) ?? reply({ ttl_hours: 3, user: null, stats: null, items: [] }),
+      new Promise((resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+    ]),
+    AbortController,
     setInterval() { intervals++; },
   });
   const app = vm.runInContext(
@@ -341,6 +346,59 @@ test("publishing waits for a stop search started while it was already waiting", 
   searches[1](reply({ items: [{ id: "BGO", name: "Bergen", lat: 60.39, lon: 5.32 }] }));
   await sent;
   assert.deepEqual([posted.lat, posted.lon, posted.stop_name], [60.39, 5.32, "Bergen"]);
+});
+
+test("publishing does not wait for a stop search a newer one replaced", async () => {
+  const searches = [];
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return new Promise((resolve) => searches.push(resolve));
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  app.updateSelection(58, 8);
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  const stop = app.element("#stopInput");
+  stop.value = "Ber";
+  stop.input();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  stop.value = "Bergen";
+  stop.input();
+  searches[1](reply({ items: [{ id: "BGO", name: "Bergen", lat: 60.39, lon: 5.32 }] }));
+  await sent;  // The search for "Ber" never answers.
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_id], [60.39, 5.32, "BGO"]);
+});
+
+test("old suggestions cannot be picked once the text changes, and closed lists stay closed", async () => {
+  const searches = [];
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? new Promise((resolve) => searches.push(resolve)) : undefined);
+  const stop = app.element("#stopInput");
+  const list = app.element("#stopOptions");
+  const key = (name) => stop.keydown({ key: name, preventDefault() {} });
+  stop.value = "Oslo S";
+  const first = stop.input();
+  searches[0](reply({ items: [{ id: "OSL", name: "Oslo S", lat: 59.91, lon: 10.75 }] }));
+  await first;
+  key("ArrowDown");
+  stop.value = "Trondheim";
+  const second = stop.input();
+  assert.equal(list.hidden, true);  // Typing clears the old suggestions at once ...
+  key("Enter");
+  assert.notEqual(stop.dataset.stopId, "OSL");  // ... so Enter cannot pick Oslo S.
+  stop.blur();
+  searches[1](reply({ items: [{ id: "TRD", name: "Trondheim S", lat: 63.44, lon: 10.4 }] }));
+  await second;
+  assert.equal(list.hidden, true);  // The late answer does not reopen a list the user left.
+  key("ArrowDown");  // The Down arrow opens it again.
+  assert.equal(list.hidden, false);
+  key("Escape");
+  assert.equal(list.hidden, true);
+  key("ArrowDown");
+  key("Enter");
+  assert.equal(stop.dataset.stopId, "TRD");
 });
 
 test("the first GPS fix leaves a stop search the user already started alone", async () => {

@@ -56,28 +56,30 @@ const userXp = document.querySelector("#userXp");
 
 // A suggestion list under a text field, used instead of <datalist>: browsers hide every datalist
 // option that does not contain the typed text, such as a stop found by its street or "31 Ruter".
-// `choose` gets the picked item; the returned function shows new items, or closes the list with [].
+// `choose` gets the picked item.
 function suggestionList(input, list, choose) {
   let items = [];
   let active = -1;
-  function render(index) {
+  let open = false; // Typing and the Down arrow open the list; Escape, leaving the field and a pick close it.
+  function render(index = -1) {
     active = index;
-    list.hidden = items.length === 0;
-    input.setAttribute("aria-expanded", String(items.length > 0));
-    input.setAttribute("aria-activedescendant", active >= 0 ? `${list.id}-${active}` : "");
-    list.innerHTML = items
-      .map((item, i) => `<li id="${list.id}-${i}" role="option" data-index="${i}" aria-selected="${i === active}">` +
-        `${escapeHtml(item.label)}</li>`)
-      .join("");
+    const shown = open && items.length > 0;
+    list.hidden = !shown;
+    input.setAttribute("aria-expanded", String(shown));
+    input.setAttribute("aria-activedescendant", shown && active >= 0 ? `${list.id}-${active}` : "");
+    list.innerHTML = shown
+      ? items
+        .map((item, i) => `<li id="${list.id}-${i}" role="option" data-index="${i}" aria-selected="${i === active}">` +
+          `${escapeHtml(item.label)}</li>`)
+        .join("")
+      : "";
     list.querySelector(`[aria-selected="true"]`)?.scrollIntoView?.({ block: "nearest" });
-  }
-  function show(newItems) {
-    items = newItems;
-    render(-1);
   }
   function pick(index) {
     const item = items[index];
-    show([]);
+    items = [];
+    open = false;
+    render();
     choose(item);
   }
   input.addEventListener("keydown", (event) => {
@@ -86,15 +88,18 @@ function suggestionList(input, list, choose) {
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      render((active + 1) % items.length);
-    } else if (event.key === "ArrowUp") {
+      const next = open ? (active + 1) % items.length : 0;
+      open = true;
+      render(next);
+    } else if (event.key === "ArrowUp" && open) {
       event.preventDefault();
       render(active > 0 ? active - 1 : items.length - 1);
-    } else if (event.key === "Enter" && active >= 0) {
+    } else if (event.key === "Enter" && open && active >= 0) {
       event.preventDefault(); // Picks the option instead of publishing the report.
       pick(active);
-    } else if (event.key === "Escape") {
-      show([]);
+    } else if (event.key === "Escape" && open) {
+      open = false;
+      render();
     }
   });
   // Keeps focus in the field while an option is clicked, so the blur below does not close the list first.
@@ -105,17 +110,37 @@ function suggestionList(input, list, choose) {
       pick(Number(option.dataset.index));
     }
   });
-  input.addEventListener("blur", () => show([]));
-  return show;
+  input.addEventListener("blur", () => {
+    open = false;
+    render();
+  });
+  return {
+    // What was just typed makes the old suggestions wrong, before the new ones arrive.
+    typed() {
+      items = [];
+      open = true;
+      render();
+    },
+    // A late answer fills a list the user has closed without opening it again.
+    show(newItems) {
+      items = newItems;
+      render();
+    },
+    close() {
+      items = [];
+      open = false;
+      render();
+    },
+  };
 }
 
-const showStopChoices = suggestionList(stopInput, stopOptions, (choice) => {
-  latest.stop++;
+const stopSuggestions = suggestionList(stopInput, stopOptions, (choice) => {
+  outdate("stop");
   stopInput.value = choice.label;
   selectStop(choice);
 });
-const showRouteChoices = suggestionList(routeInput, routeOptions, (route) => {
-  latest.route++;
+const routeSuggestions = suggestionList(routeInput, routeOptions, (route) => {
+  outdate("route");
   routeInput.value = route.value;
 });
 
@@ -141,11 +166,20 @@ function postJson(url, body) {
 
 // Only the newest request of each kind may update the page; older answers are dropped.
 const latest = { me: 0, sightings: 0, nearby: 0, stop: 0, route: 0 };
+const controllers = {};
+
+// Outdates the running request of this kind and aborts it, so nothing waits for its answer.
+function outdate(kind) {
+  latest[kind]++;
+  controllers[kind]?.abort();
+}
 
 async function fetchLatest(kind, url) {
-  const request = ++latest[kind];
+  outdate(kind);
+  const request = latest[kind];
+  const controller = (controllers[kind] = new AbortController());
   try {
-    const payload = await fetchJson(url);
+    const payload = await fetchJson(url, { signal: controller.signal });
     return request === latest[kind] ? payload : null;
   } catch (error) {
     if (request === latest[kind]) {
@@ -393,8 +427,8 @@ const showLoadError = (error) => {
 
 async function loadNearbyStop(lat, lon, replaceStop = true) {
   if (replaceStop) {
-    latest.stop++; // A newer position also outdates pending stop searches and their suggestions.
-    showStopChoices([]);
+    outdate("stop"); // A newer position also outdates pending stop searches and their suggestions.
+    stopSuggestions.close();
     stopInput.value = "";
     stopInput.dataset.stopId = "";
   }
@@ -440,7 +474,7 @@ function stopChoices(stops) {
 }
 
 function selectStop({ stop, label }) {
-  latest.nearby++; // The position moves to this stop, so a pending nearby answer is outdated.
+  outdate("nearby"); // The position moves to this stop, so a pending nearby answer is outdated.
   updateSelection(stop.lat, stop.lon);
   map.panTo([stop.lat, stop.lon]);
   nearestStop.textContent = `${label} (valgt)`;
@@ -506,6 +540,7 @@ stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 async function searchStop() {
   const query = stopInput.value.trim();
   stopInput.dataset.stopId = "";
+  stopSuggestions.typed();
   try {
     // Results closest to what the map shows come first.
     const { lat, lng } = map.wrapLatLng(map.getCenter());
@@ -514,27 +549,28 @@ async function searchStop() {
       return;
     }
     const choices = stopChoices(payload.items);
-    showStopChoices(choices);
+    stopSuggestions.show(choices);
     // A fully typed name picks its stop when no other stop in the list shares it.
     const exact = choices.find((choice) => choice.label === query);
     if (exact) {
       selectStop(exact);
     }
   } catch (error) {
-    showStopChoices([]);
+    stopSuggestions.show([]);
     nearestStop.textContent = error.message;
   }
 }
 
 routeInput.addEventListener("input", async () => {
   const setRouteStatus = lateStatus();
+  routeSuggestions.typed();
   try {
     const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
     if (payload) {
-      showRouteChoices(payload.items); // Each line's value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
+      routeSuggestions.show(payload.items); // Each value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
     }
   } catch (error) {
-    showRouteChoices([]);
+    routeSuggestions.show([]);
     setRouteStatus(error.message, "error");
   }
 });
