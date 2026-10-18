@@ -71,7 +71,7 @@ function postJson(url, body) {
 }
 
 // Only the newest request of each kind may update the page; older answers are dropped.
-const latest = { me: 0, sightings: 0, stop: 0, route: 0 };
+const latest = { me: 0, sightings: 0, nearby: 0, stop: 0, route: 0 };
 
 async function fetchLatest(kind, url) {
   const request = ++latest[kind];
@@ -170,6 +170,7 @@ function updateSelection(lat, lon) {
     state.selectionMarker = L.marker([lat, lon], {
       draggable: true,
       icon: makeIcon("bee-dot"),
+      title: "Valgt rapportposisjon",
     }).addTo(map);
     state.selectionMarker.on("dragend", (event) => selectPoint(event.target.getLatLng()));
   } else {
@@ -186,6 +187,7 @@ function updateCurrentLocation(lat, lon, accuracy) {
   if (!state.currentLocationMarker) {
     state.currentLocationMarker = L.marker([lat, lon], {
       icon: makeIcon("user-dot"),
+      title: "Din posisjon",
     })
       .addTo(map)
       .bindPopup("Du er her");
@@ -257,7 +259,12 @@ function renderSightings(items) {
     const ageClass = markerAgeClass(item.created_at);
     let marker = sightingMarkers.get(item.id);
     if (!marker) {
-      marker = L.marker([item.lat, item.lon], { icon: makeIcon(ageClass) }).bindPopup("").addTo(state.sightingsLayer);
+      marker = L.marker([item.lat, item.lon], {
+        icon: makeIcon(ageClass),
+        title: `Observasjon ved ${item.stop_name || "ukjent sted"}`,
+      })
+        .bindPopup("")
+        .addTo(state.sightingsLayer);
       sightingMarkers.set(item.id, marker);
     } else if (marker.ageClass !== ageClass) {
       marker.setIcon(makeIcon(ageClass));
@@ -299,24 +306,23 @@ const showLoadError = (error) => {
   feedStatus.textContent = error.message;
 };
 
-// Position changes and stop searches share one counter: only the newest may fill in the stop.
 async function loadNearbyStop(lat, lon) {
+  latest.stop++; // A newer position also outdates pending stop searches.
   nearestStop.textContent = "Laster...";
   stopInput.value = "";
   stopInput.dataset.stopId = "";
   try {
-    const payload = await fetchLatest("stop", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
+    const payload = await fetchLatest("nearby", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
     if (!payload) {
       return;
     }
     const [closest] = payload.items;
-    if (!closest) {
-      nearestStop.textContent = "Fant ingen holdeplass innen 2 km.";
-      return;
+    nearestStop.textContent = closest ? `${closest.name} (${closest.distance_m} m)` : "Fant ingen holdeplass innen 2 km.";
+    // Fill in the stop unless the user has started typing one meanwhile.
+    if (closest && !stopInput.value) {
+      stopInput.value = closest.name;
+      stopInput.dataset.stopId = closest.id;
     }
-    nearestStop.textContent = `${closest.name} (${closest.distance_m} m)`;
-    stopInput.value = closest.name;
-    stopInput.dataset.stopId = closest.id;
   } catch (error) {
     nearestStop.textContent = error.message;
   }
@@ -340,6 +346,7 @@ function stopChoices(stops) {
 }
 
 function selectStop({ stop, label }) {
+  latest.nearby++; // The position moves to this stop, so a pending nearby answer is outdated.
   updateSelection(stop.lat, stop.lon);
   map.panTo([stop.lat, stop.lon]);
   nearestStop.textContent = `${label} (valgt)`;
@@ -366,11 +373,13 @@ function startLocationTracking(selectLocation = false) {
   }
 
   locateBtn.disabled = true;
+  const selectionBefore = state.selectedLatLng;
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
       setStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
-      handleLocationUpdate(position, true, selectLocation);
+      // A spot picked by hand while GPS was answering wins over the button press.
+      handleLocationUpdate(position, true, selectLocation && state.selectedLatLng === selectionBefore);
     },
     () => {
       locateBtn.disabled = false;
@@ -469,6 +478,7 @@ reportForm.addEventListener("submit", async (event) => {
   submitButton.disabled = true;
   setStatus("Publiserer...");
 
+  const note = noteInput.value.trim();
   let item;
   try {
     item = await postJson("/api/sightings", {
@@ -477,7 +487,7 @@ reportForm.addEventListener("submit", async (event) => {
       stop_name: stopInput.value.trim(),
       stop_id: stopInput.dataset.stopId || "",
       route: routeInput.value.trim(),
-      note: noteInput.value.trim(),
+      note,
     });
   } catch (error) {
     setStatus(error.message, "error");
@@ -485,7 +495,9 @@ reportForm.addEventListener("submit", async (event) => {
   } finally {
     submitButton.disabled = false;
   }
-  noteInput.value = "";
+  if (noteInput.value.trim() === note) {
+    noteInput.value = ""; // Keep a new note typed while this one was sent.
+  }
   setStatus(
     item.reporter === "Anonym" ? "Observasjonen er publisert anonymt." : `Observasjonen er publisert som ${item.reporter}.`,
     "ok"

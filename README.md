@@ -32,18 +32,21 @@ holdeplass- og linjesøk gir ingen treff. Sted og linje kan skrives inn manuelt.
 ## Lagring
 
 Alt lagres i SQLite-databasen `storage/beeware.db`: brukere med XP og antall likes, sesjoner,
-observasjoner og likes. Observasjoner vises i 3 timer før de ryddes bort automatisk, mens XP blir
-værende. En like og XP-en den gir, lagres i samme transaksjon.
+observasjoner og likes. Observasjoner vises i 3 timer, mens XP blir værende. Utløpte observasjoner
+slettes når neste observasjon sendes inn, og utløpte sesjoner ved neste innlogging. En like og XP-en
+den gir, lagres i samme transaksjon, og det samme gjelder en ny bruker og første innlogging.
 `storage/` opprettes automatisk og ignoreres av Git. Ikke del databasen; den inneholder brukerdata.
 
 ## Grenser
 
 - Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
-- Forespørsler kan være på maks 4 KB, og POST fra andre nettsteder avvises.
-- Alle svar har en Content-Security-Policy som bare slipper inn Leaflet fra unpkg og fliser fra
+- JSON-innhold kan være på maks 4 KB, og POST fra andre nettsteder avvises.
+- Alle svar har en Content-Security-Policy som bare slipper inn Leaflet 1.9.4 fra unpkg og fliser fra
   OpenStreetMap, og siden kan ikke bygges inn i andre nettsteder.
-- Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`, får cookiene `Secure`.
-  Bak en proxy telles hver klient etter siste adresse i `X-Forwarded-For`.
+- Serveren lytter bare på `127.0.0.1`. Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`,
+  får cookiene `Secure`. Hver klient telles etter siste adresse i `X-Forwarded-For`, så proxyen må
+  legge til klientens adresse der (nginx: `$proxy_add_x_forwarded_for`; Caddy gjør det selv).
+- Er databasen opptatt i mer enn 10 sekunder, svarer serveren 503 i stedet for å henge.
 
 ## Før offentlig drift
 

@@ -29,6 +29,9 @@ async function setup(route = () => undefined) {
     clearLayers() {},
     setLatLng(value) { this.point = value; return this; },
     setRadius(value) { this.options.radius = value; return this; },
+    setIcon(icon) { this.options.icon = icon; return this; },
+    setPopupContent(html) { this.popup = html; return this; },
+    removeLayer(child) { child.removed = true; },
   });
   let currentCallback;
   let watchCallback;
@@ -49,7 +52,7 @@ async function setup(route = () => undefined) {
     setInterval() { intervals++; },
   });
   const app = vm.runInContext(
-    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser }; })()`, context,
+    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser, loadSightings, sightingMarkers }; })()`, context,
   );
   await settle();
   return {
@@ -73,6 +76,10 @@ test("GPS preserves manual selection; button moves selection to current position
   app.watch(59.1, 9.1);
   assert.equal(app.state.selectedLatLng.lat, 58);
   assert.equal(status.textContent, "Publisering feilet.");  // Background GPS keeps other messages.
+  app.click();
+  app.updateSelection(57, 7);  // Picked by hand while GPS is still answering ...
+  app.current(56, 6);
+  assert.equal(app.state.selectedLatLng.lat, 57);  // ... so the late GPS answer does not move it.
   app.click();
   app.current(60, 10);
   assert.equal(app.state.selectedLatLng.lat, 60);
@@ -189,4 +196,53 @@ test("a published report stays reported as published when the refresh fails", as
   await settle();
   assert.equal(app.element("#formStatus").textContent, "Observasjonen er publisert som alice.");
   assert.equal(app.element("#feedStatus").textContent, "Serveren svarer ikke.");
+});
+
+test("typing a stop while the nearest stop loads keeps the text and still shows the nearest stop", async () => {
+  const pending = [];
+  const app = await setup((url) => url.startsWith("/api/stops/nearby")
+    ? new Promise((resolve) => pending.push(resolve)) : undefined);
+  const stop = app.element("#stopInput");
+  const nearby = app.loadNearbyStop(58, 8);
+  stop.value = "Mitt sted";
+  await stop.input();
+  pending[0](reply({ items: [{ id: "A", name: "Alfa", distance_m: 40 }] }));
+  await nearby;
+  assert.equal(app.element("#nearestStop").textContent, "Alfa (40 m)");
+  assert.equal(stop.value, "Mitt sted");
+  assert.equal(stop.dataset.stopId, "");
+});
+
+test("refreshing updates sighting markers in place and removes expired ones", async () => {
+  const sighting = (id, stop_name, likes_count = 0) => ({
+    id, stop_name, likes_count, lat: 58, lon: 8, route: "", note: "", reporter: "Anonym",
+    created_at: new Date().toISOString(), distance_to_stop_m: null, liked_by_me: false,
+  });
+  let items = [sighting("a", "Alfa"), sighting("b", "Beta")];
+  const app = await setup((url) => url === "/api/sightings" ? reply({ items }) : undefined);
+  const alfa = app.sightingMarkers.get("a");
+  const beta = app.sightingMarkers.get("b");
+  assert.match(alfa.popup, /Alfa/);
+  assert.equal(alfa.options.title, "Observasjon ved Alfa");
+  items = [sighting("a", "Alfa", 2)];
+  await app.loadSightings();
+  assert.equal(app.sightingMarkers.get("a"), alfa);
+  assert.match(alfa.popup, /2 bekreftelser/);
+  assert.equal(app.sightingMarkers.has("b"), false);
+  assert.equal(beta.removed, true);
+});
+
+test("a note typed while the previous one is sent is kept", async () => {
+  let answer;
+  const app = await setup((url, options) => options?.method === "POST"
+    ? new Promise((resolve) => { answer = resolve; }) : undefined);
+  app.updateSelection(58, 8);
+  for (const id of ["#stopInput", "#routeInput"]) app.element(id).value = "";
+  const note = app.element("#noteInput");
+  note.value = "Første";
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  note.value = "Andre";
+  answer(reply({ reporter: "Anonym" }));
+  await sent;
+  assert.equal(note.value, "Andre");
 });
