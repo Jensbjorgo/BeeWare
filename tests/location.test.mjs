@@ -545,6 +545,25 @@ test("publishing waits for the GPS button unless the user picks a spot meanwhile
   assert.equal(posted[1].lat, 58);
 });
 
+test("GPS fixes do not hold up publishing, and the server picks the stop for the position sent", async () => {
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/nearby")) return new Promise(() => {});  // Lookups slower than the fixes.
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  const stop = app.element("#stopInput");
+  Object.assign(stop, { value: "Storgata" });
+  Object.assign(stop.dataset, { stopId: "SG", fromGps: "true" });  // Filled in from an earlier fix.
+  app.watch(59.91, 10.75);
+  app.watch(59.92, 10.76);
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_name, posted.stop_id], [59.92, 10.76, "", ""]);
+});
+
 test("typing a stop drops a GPS stop lookup still waiting its turn", async () => {
   const lookups = [];
   const app = await setup((url) => {

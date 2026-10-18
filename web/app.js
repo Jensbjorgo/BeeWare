@@ -674,14 +674,12 @@ reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitButton = reportForm.querySelector("button[type='submit']");
   submitButton.disabled = true;
-  // Wait for the latest stop search and GPS button press, then for a GPS stop lookup still running,
-  // and read the form in one go.
+  // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
   let waits;
   do {
     waits = [stopSearch, gpsWait];
     await Promise.all(waits);
   } while (waits[0] !== stopSearch || waits[1] !== gpsWait);
-  await gpsLookup;
   if (!state.selectedLatLng) {
     submitButton.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
@@ -690,13 +688,15 @@ reportForm.addEventListener("submit", async (event) => {
   setStatus("Publiserer...");
 
   const note = noteInput.value.trim();
+  // A stop GPS filled in may be one fix behind; the server picks the stop nearest the position sent.
+  const stopFromGps = stopInput.dataset.fromGps === "true";
   let item;
   try {
     item = await postJson("/api/sightings", {
       lat: state.selectedLatLng.lat,
       lon: state.selectedLatLng.lon,
-      stop_name: stopInput.value.trim(),
-      stop_id: stopInput.dataset.stopId || "",
+      stop_name: stopFromGps ? "" : stopInput.value.trim(),
+      stop_id: stopFromGps ? "" : stopInput.dataset.stopId || "",
       route: routeInput.value.trim(),
       note,
     });
