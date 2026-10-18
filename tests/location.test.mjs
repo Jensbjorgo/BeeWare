@@ -241,8 +241,46 @@ test("a note typed while the previous one is sent is kept", async () => {
   const note = app.element("#noteInput");
   note.value = "Første";
   const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  await settle();
   note.value = "Andre";
   answer(reply({ reporter: "Anonym" }));
   await sent;
   assert.equal(note.value, "Andre");
+});
+
+test("login, registration and logout run one at a time", async () => {
+  const logins = [];
+  const app = await setup((url) => url === "/api/auth/login"
+    ? new Promise((resolve) => logins.push(resolve)) : undefined);
+  const form = app.element("#loginForm");
+  form.querySelectorAll = () => [{ value: "alice" }, { value: "secret1" }];
+  form.reset = () => {};
+  const first = form.submit({ preventDefault() {} });
+  form.submit({ preventDefault() {} });
+  await app.element("#logoutBtn").click();
+  assert.equal(logins.length, 1);  // The double click and the logout wait for the first login.
+  logins[0](reply({ user: { username: "alice" } }));
+  await first;
+  assert.equal(app.state.user.username, "alice");
+});
+
+test("publishing waits for a pending stop search that moves the position", async () => {
+  let answerSearch;
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return new Promise((resolve) => { answerSearch = resolve; });
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  app.updateSelection(58, 8);
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  const stop = app.element("#stopInput");
+  stop.value = "Bergen";
+  stop.input();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  answerSearch(reply({ items: [{ id: "BGO", name: "Bergen", lat: 60.39, lon: 5.32 }] }));
+  await sent;
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_id], [60.39, 5.32, "BGO"]);
 });

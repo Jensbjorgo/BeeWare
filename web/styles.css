@@ -142,8 +142,8 @@ textarea {
 
 input:focus,
 textarea:focus {
-  outline: 2px solid rgba(247, 198, 0, 0.35);
-  border-color: var(--accent);
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 1px;
 }
 
 button {

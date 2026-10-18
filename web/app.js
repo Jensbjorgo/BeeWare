@@ -178,7 +178,9 @@ function updateSelection(lat, lon) {
   }
 }
 
-function selectPoint({ lat, lng }) {
+function selectPoint(point) {
+  // Panning past the date line shows copies of the world; wrap back to -180..180.
+  const { lat, lng } = map.wrapLatLng(point);
   updateSelection(lat, lng);
   loadNearbyStop(lat, lng);
 }
@@ -403,8 +405,12 @@ function startLocationTracking(selectLocation = false) {
 }
 
 let shownStops = [];
+// Publishing waits for this, since a search may still move the report position.
+let stopSearch = Promise.resolve();
 
-stopInput.addEventListener("input", async () => {
+stopInput.addEventListener("input", () => (stopSearch = searchStop()));
+
+async function searchStop() {
   const query = stopInput.value.trim();
   stopInput.dataset.stopId = "";
   // A picked option is matched against the list it came from; its label may not be searchable.
@@ -430,7 +436,7 @@ stopInput.addEventListener("input", async () => {
     renderOptions(stopOptions, []);
     nearestStop.textContent = error.message;
   }
-});
+}
 
 routeInput.addEventListener("input", async () => {
   try {
@@ -469,13 +475,14 @@ locateBtn.addEventListener("click", () => {
 
 reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const submitButton = reportForm.querySelector("button[type='submit']");
+  submitButton.disabled = true;
+  await stopSearch;
   if (!state.selectedLatLng) {
+    submitButton.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
     return;
   }
-
-  const submitButton = reportForm.querySelector("button[type='submit']");
-  submitButton.disabled = true;
   setStatus("Publiserer...");
 
   const note = noteInput.value.trim();
@@ -509,37 +516,56 @@ authToggle.addEventListener("click", () => {
   toggleAuth();
 });
 
+// Login, registration and logout run one at a time: a late answer would set its cookie anyway.
+let authBusy = false;
+
+async function runAuth(action) {
+  if (authBusy) {
+    return;
+  }
+  authBusy = true;
+  try {
+    await action();
+  } finally {
+    authBusy = false;
+  }
+}
+
 function handleAuthForm(form, url, message) {
-  form.addEventListener("submit", async (event) => {
+  form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const [username, password] = form.querySelectorAll("input");
-    try {
-      const payload = await postJson(url, { username: username.value.trim(), password: password.value });
-      setUser(payload.user);
-    } catch (error) {
-      setAuthStatus(error.message, "error");
-      return;
-    }
-    setAuthStatus(message, "ok");
-    form.reset();
-    refresh().catch(showLoadError);
+    return runAuth(async () => {
+      const [username, password] = form.querySelectorAll("input");
+      try {
+        const payload = await postJson(url, { username: username.value.trim(), password: password.value });
+        setUser(payload.user);
+      } catch (error) {
+        setAuthStatus(error.message, "error");
+        return;
+      }
+      setAuthStatus(message, "ok");
+      form.reset();
+      refresh().catch(showLoadError);
+    });
   });
 }
 
 handleAuthForm(loginForm, "/api/auth/login", "Innlogging vellykket.");
 handleAuthForm(registerForm, "/api/auth/register", "Profil opprettet.");
 
-logoutBtn.addEventListener("click", async () => {
-  try {
-    await fetchJson("/api/auth/logout", { method: "POST" });
-  } catch (error) {
-    setAuthStatus(error.message, "error");
-    return;
-  }
-  setUser(null);
-  setAuthStatus("Du er logget ut. Observasjoner kan fortsatt sendes anonymt.", "ok");
-  refresh().catch(showLoadError);
-});
+logoutBtn.addEventListener("click", () =>
+  runAuth(async () => {
+    try {
+      await fetchJson("/api/auth/logout", { method: "POST" });
+    } catch (error) {
+      setAuthStatus(error.message, "error");
+      return;
+    }
+    setUser(null);
+    setAuthStatus("Du er logget ut. Observasjoner kan fortsatt sendes anonymt.", "ok");
+    refresh().catch(showLoadError);
+  })
+);
 
 // Each part starts on its own, so one failed request cannot stop GPS or refreshing.
 loadConfig().catch(showLoadError);
