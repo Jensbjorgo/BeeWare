@@ -25,6 +25,8 @@ const state = {
   authOpen: false,
   hasAutoCentered: false,
   watchId: null,
+  selectionFollowsGps: false,
+  manualChanges: 0, // Spots and stops the user picks or types; a pending button press yields to them.
 };
 
 const reportForm = document.querySelector("#reportForm");
@@ -286,6 +288,10 @@ function updateAuthUi() {
 function updateSelection(lat, lon, fromGps = false) {
   state.selectedLatLng = { lat, lon };
   state.selectionFollowsGps = fromGps;
+  if (!fromGps) {
+    state.manualChanges++;
+    gpsFix = null; // A queued GPS stop lookup no longer applies.
+  }
   selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
     state.selectionMarker = L.marker([lat, lon], {
@@ -423,7 +429,25 @@ async function loadSightings() {
   }
 }
 
-const refresh = () => Promise.all([loadSightings(), loadCurrentUser()]);
+let refreshing = null;
+// A refresh replaces an older one; the 20 s poll waits for a running refresh instead of aborting it.
+function refresh() {
+  const run = (async () => {
+    try {
+      const results = await Promise.allSettled([loadSightings(), loadCurrentUser()]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed) {
+        throw failed.reason;
+      }
+    } finally {
+      if (refreshing === run) {
+        refreshing = null;
+      }
+    }
+  })();
+  refreshing = run;
+  return run;
+}
 // Load errors are shown by the list, so they never hide the result of an action.
 const showLoadError = (error) => {
   feedStatus.textContent = error.message;
@@ -488,13 +512,30 @@ function selectStop({ stop, label }) {
   stopInput.dataset.fromGps = "false";
 }
 
+// GPS fixes can come faster than nearby answers, so one lookup runs at a time and then catches up
+// with the newest fix, instead of each fix aborting the last.
+let gpsFix = null;
+let gpsLookup = null;
+function lookUpStopForGps(lat, lon, fromButton) {
+  gpsFix = { lat, lon, fromButton: fromButton || Boolean(gpsFix?.fromButton) };
+  gpsLookup ??= (async () => {
+    while (gpsFix) {
+      const fix = gpsFix;
+      gpsFix = null;
+      // A stop GPS filled in follows too, but GPS leaves a stop the user is typing, and its search, alone.
+      const replaceStop = fix.fromButton || !stopInput.value || stopInput.dataset.fromGps === "true";
+      await loadNearbyStop(fix.lat, fix.lon, replaceStop);
+    }
+    gpsLookup = null;
+  })();
+}
+
 function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
   const { latitude, longitude, accuracy } = position.coords;
   updateCurrentLocation(latitude, longitude, accuracy);
   if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
     updateSelection(latitude, longitude, true);
-    // A stop GPS filled in follows too, but GPS leaves a stop the user is typing, and its search, alone.
-    loadNearbyStop(latitude, longitude, selectLocation || !stopInput.value || stopInput.dataset.fromGps === "true");
+    lookUpStopForGps(latitude, longitude, selectLocation);
   }
   if (shouldCenter || !state.hasAutoCentered) {
     map.flyTo([latitude, longitude], 14);
@@ -509,14 +550,14 @@ function startLocationTracking(selectLocation = false) {
   }
 
   locateBtn.disabled = true;
-  const selectionBefore = state.selectedLatLng;
+  const changesBefore = state.manualChanges;
   const setGpsStatus = lateStatus();
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
       setGpsStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
-      // A spot picked by hand while GPS was answering wins over the button press.
-      handleLocationUpdate(position, true, selectLocation && state.selectedLatLng === selectionBefore);
+      // A spot picked or a stop typed by hand while GPS was answering wins over the button press.
+      handleLocationUpdate(position, true, selectLocation && state.manualChanges === changesBefore);
     },
     () => {
       locateBtn.disabled = false;
@@ -530,7 +571,12 @@ function startLocationTracking(selectLocation = false) {
   }
   state.watchId = navigator.geolocation.watchPosition(
     (position) => handleLocationUpdate(position, false),
-    () => {
+    (error) => {
+      if (error.code === error.PERMISSION_DENIED) {
+        // The browser has ended this watch, so the next button press starts a new one.
+        navigator.geolocation.clearWatch(state.watchId);
+        state.watchId = null;
+      }
       if (!state.currentLocationMarker) {
         setGpsStatus("Lokasjonstjenester er blokkert eller utilgjengelige.", "error");
       }
@@ -546,6 +592,7 @@ stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 
 async function searchStop() {
   const query = stopInput.value.trim();
+  state.manualChanges++;
   stopInput.dataset.stopId = "";
   stopInput.dataset.fromGps = "false";
   stopSuggestions.typed();
@@ -710,8 +757,8 @@ loadConfig().catch(showLoadError);
 loadCurrentUser().catch((error) => setAuthStatus(error.message, "error"));
 loadSightings().catch(showLoadError);
 startLocationTracking();
-// A poll waits for the previous one, since starting a new one would abort answers slower than 20 s.
-let polling = null;
 setInterval(() => {
-  polling ??= refresh().catch(showLoadError).finally(() => (polling = null));
+  if (!refreshing) {
+    refresh().catch(showLoadError);
+  }
 }, 20000);

@@ -36,6 +36,7 @@ async function setup(route = () => undefined) {
   });
   let currentCallback;
   let watchCallback;
+  let watchError;
   let watches = 0;
   let intervals = 0;
   let poll;
@@ -51,7 +52,8 @@ async function setup(route = () => undefined) {
     document: { querySelector: element },
     navigator: { geolocation: {
       getCurrentPosition(callback) { currentCallback = callback; },
-      watchPosition(callback) { watchCallback = callback; watches++; return 0; },
+      watchPosition(callback, onError) { watchCallback = callback; watchError = onError; watches++; return 0; },
+      clearWatch() {},
     } },
     // Like the browser, an aborted request rejects at once even if its answer never comes.
     fetch: (url, options) => Promise.race([
@@ -72,6 +74,7 @@ async function setup(route = () => undefined) {
     current: (lat, lon, accuracy = 25) => currentCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watch: (lat, lon, accuracy = 25) => watchCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watches: () => watches,
+    watchDenied: () => watchError({ code: 1, PERMISSION_DENIED: 1 }),
     intervals: () => intervals,
     poll: () => poll(),
   };
@@ -440,6 +443,73 @@ test("old suggestions cannot be picked once the text changes, and closed lists s
   searches[2](reply({ items: [{ id: "BOO", name: "Bodø", lat: 67.28, lon: 14.4 }] }));
   await third;
   assert.equal(list.hidden, true);  // ... keeps its answer from opening the list.
+});
+
+test("a stop typed while the GPS button waits wins over its answer", async () => {
+  let answerSearch;
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return new Promise((resolve) => { answerSearch = resolve; });
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  app.current(59.91, 10.75);  // The startup fix: the report follows GPS.
+  await settle();
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  app.click();
+  const stop = app.element("#stopInput");
+  stop.value = "Dragvoll";
+  stop.input();
+  const sent = app.element("#reportForm").submit({ preventDefault() {} });
+  app.current(59.92, 10.76);  // The button's fix arrives after the user started typing.
+  assert.equal(stop.value, "Dragvoll");
+  answerSearch(reply({ items: [{ id: "DRV", name: "Dragvoll", lat: 63.41, lon: 10.47 }] }));
+  await sent;
+  assert.deepEqual([posted.lat, posted.lon, posted.stop_id], [63.41, 10.47, "DRV"]);
+});
+
+test("GPS fixes faster than nearby answers still get a stop, for the newest fix", async () => {
+  const lookups = [];
+  const app = await setup((url) => url.startsWith("/api/stops/nearby")
+    ? new Promise((resolve) => lookups.push({ url, resolve })) : undefined);
+  app.watch(59.91, 10.75);
+  app.watch(59.92, 10.75);
+  app.watch(59.93, 10.75);
+  assert.equal(lookups.length, 1);  // One lookup at a time, none aborted ...
+  lookups[0].resolve(reply({ items: [{ id: "A", name: "Alfa", distance_m: 5 }] }));
+  await settle();
+  assert.equal(lookups.length, 2);
+  assert.match(lookups[1].url, /lat=59.93/);  // ... then the newest fix.
+  lookups[1].resolve(reply({ items: [{ id: "C", name: "Cesar", distance_m: 5 }] }));
+  await settle();
+  assert.equal(app.element("#stopInput").value, "Cesar");
+});
+
+test("GPS tracking starts again after permission was denied and then allowed", async () => {
+  const app = await setup();
+  app.watchDenied();
+  app.click();
+  assert.equal(app.watches(), 2);
+});
+
+test("a refresh holds the poll until both requests are done, even when one fails", async () => {
+  const sightings = [];
+  let failMe = false;
+  const app = await setup((url) => {
+    if (url === "/api/sightings" && failMe) return new Promise((resolve) => sightings.push(resolve));
+    if (url === "/api/me" && failMe) return reply({ error: "Feil" }, false);
+  });
+  failMe = true;
+  app.poll();
+  await settle();
+  app.poll();  // /api/me failed at once, but /api/sightings is still loading.
+  assert.equal(sightings.length, 1);
+  sightings[0](reply({ items: [] }));
+  await settle();
+  app.poll();
+  assert.equal(sightings.length, 2);
 });
 
 test("the first GPS fix leaves a stop search the user already started alone", async () => {
