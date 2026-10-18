@@ -26,7 +26,8 @@ async function setup(route = () => undefined) {
     point, options,
     addTo() { return this; },
     bindPopup() { return this; },
-    on() { return this; },
+    events: {},
+    on(event, handler) { this.events[event] = handler; return this; },
     clearLayers() {},
     setLatLng(value) { this.point = value; return this; },
     setRadius(value) { this.options.radius = value; return this; },
@@ -41,6 +42,7 @@ async function setup(route = () => undefined) {
   let watches = 0;
   let intervals = 0;
   let poll;
+  const timeouts = new Set();
   const context = vm.createContext({
     L: {
       map: () => ({
@@ -59,13 +61,15 @@ async function setup(route = () => undefined) {
     // Like the browser, an aborted request rejects at once even if its answer never comes.
     fetch: (url, options) => Promise.race([
       route(url, options) ?? reply({ ttl_hours: 3, user: null, stats: null, items: [] }),
-      new Promise((resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+      new Promise((resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError")))),
     ]),
     AbortController,
     setInterval(callback) { intervals++; poll = callback; },
+    setTimeout(callback) { timeouts.add(callback); return callback; },
+    clearTimeout(callback) { timeouts.delete(callback); },
   });
   const app = vm.runInContext(
-    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser, loadSightings, sightingMarkers }; })()`, context,
+    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, loadCurrentUser, loadSightings, sightingMarkers, tiles }; })()`, context,
   );
   await settle();
   return {
@@ -79,6 +83,7 @@ async function setup(route = () => undefined) {
     watchDenied: () => watchError({ code: 1, PERMISSION_DENIED: 1 }),
     intervals: () => intervals,
     poll: () => poll(),
+    timeOut: () => timeouts.forEach((callback) => callback()),
   };
 }
 
@@ -745,4 +750,40 @@ test("stop searches send the map centre, and every line found is offered with it
   list.click({ target: { closest: () => ({ dataset: { index: "1" } }) } });
   assert.equal(route.value, "48 Høllen - Nodelandsheia · Agder");  // The value says which line 48 it was.
   assert.equal(list.hidden, true);
+});
+
+test("a request without an answer fails after the timeout with a message", async () => {
+  const app = await setup((url) => url.startsWith("/api/routes") ? new Promise(() => {}) : undefined);
+  const route = app.element("#routeInput");
+  route.value = "31";
+  route.input();
+  await settle();
+  app.timeOut();
+  await settle();
+  assert.match(app.element("#formStatus").textContent, /Fikk ikke svar fra serveren/);
+});
+
+test("the line search sends the report position, so nearby lines come first", async () => {
+  const urls = [];
+  const app = await setup((url) => { urls.push(url); });
+  app.updateSelection(63.4168, 10.4076);
+  const route = app.element("#routeInput");
+  route.value = "3";
+  route.input();
+  await settle();
+  assert.ok(urls.includes("/api/routes?q=3&lat=63.4168&lon=10.4076"));
+});
+
+test("failed map tiles show a message and a later successful load clears it", async () => {
+  const app = await setup();
+  const status = app.element("#mapStatus");
+  app.tiles.events.loading();
+  app.tiles.events.tileerror();
+  app.tiles.events.load();
+  assert.match(status.textContent, /Kartbildene kunne ikke lastes/);
+  app.tiles.events.loading();
+  app.tiles.events.tileerror();
+  app.tiles.events.tileload();
+  app.tiles.events.load();
+  assert.equal(status.textContent, "");  // Some images arrived, so the map works.
 });

@@ -60,10 +60,9 @@ STOP_ID_MAX = 64
 # (requests, seconds) per client IP. Three reports per ten minutes means one
 # client cannot push all active reports out of the 500-report store.
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
-# Leaflet comes from unpkg and the map tiles from Kartverket; nothing else is loaded.
+# Only the map tiles come from elsewhere (Kartverket); Leaflet is served from web/vendor.
 CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; script-src 'self' https://unpkg.com/leaflet@1.9.4/;"
-    " style-src 'self' https://unpkg.com/leaflet@1.9.4/;"
+    "default-src 'self';"
     " img-src 'self' data: https://cache.kartverket.no; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 
@@ -495,6 +494,7 @@ RATE_LOCK = threading.Lock()
 
 class AppHandler(SimpleHTTPRequestHandler):
     timeout = REQUEST_TIMEOUT_SECONDS
+    static_file = False  # One request per handler: the server speaks HTTP/1.0.
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
@@ -540,6 +540,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/":
             self.path = "/index.html"
+        self.static_file = True
         if self.command == "HEAD":
             super().do_HEAD()
         else:
@@ -550,6 +551,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.static_file:  # Browsers check for a newer version before they use a cached copy.
+            self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def route_post(self, parsed: Any) -> None:

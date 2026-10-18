@@ -6,13 +6,27 @@ const map = L.map("map", {
 map.setView([59.9139, 10.7522], 12); // Oslo until GPS finds the user.
 
 // Kartverket's official topographic map of Norway; its cache serves zoom levels up to 18.
-L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png", {
+const tiles = L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png", {
   maxZoom: 18,
   attribution:
     '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
     '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
     '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
 }).addTo(map);
+
+// Says so when none of the map images load, as when the network or a content blocker stops them.
+const mapStatus = document.querySelector("#mapStatus");
+let tilesLoaded = 0;
+let tilesFailed = 0;
+tiles
+  .on("loading", () => { tilesLoaded = tilesFailed = 0; })
+  .on("tileload", () => { tilesLoaded++; })
+  .on("tileerror", () => { tilesFailed++; })
+  .on("load", () => {
+    mapStatus.textContent = tilesFailed && !tilesLoaded
+      ? "Kartbildene kunne ikke lastes fra Kartverket. Sjekk nettet og eventuell innholdsblokkering."
+      : "";
+  });
 
 const state = {
   selectedLatLng: null,
@@ -148,16 +162,29 @@ const routeSuggestions = suggestionList(routeInput, routeOptions, (route) => {
   routeInput.value = route.value;
 });
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || "Klarte ikke å hente data.");
+const REQUEST_TIMEOUT_MS = 15000;
+
+// A request that gets no answer, such as on a dead mobile connection, fails after REQUEST_TIMEOUT_MS.
+async function fetchJson(url, { signal, ...options } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  signal?.addEventListener("abort", () => controller.abort());
+  try {
+    const response = await fetch(url, { credentials: "same-origin", ...options, signal: controller.signal });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || "Klarte ikke å hente data.");
+    }
+    return await response.json();
+  } catch (error) {
+    // A timeout aborts, and fetch rejects with a TypeError when the network fails.
+    if (!signal?.aborted && (error.name === "AbortError" || error instanceof TypeError)) {
+      throw new Error("Fikk ikke svar fra serveren. Sjekk nettet og prøv igjen.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return response.json();
 }
 
 function postJson(url, body) {

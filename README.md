@@ -74,8 +74,10 @@ den gir, lagres i samme transaksjon, og det samme gjelder en ny bruker og først
 
 - Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
 - JSON-innhold kan være på maks 4 KB, og POST fra andre nettsteder avvises.
-- Alle svar med innhold har en Content-Security-Policy som bare slipper inn Leaflet 1.9.4 fra unpkg og fliser fra
-  Kartverket, og siden kan ikke bygges inn i andre nettsteder.
+- Alle svar med innhold har en Content-Security-Policy som bare slipper inn kartfliser fra Kartverket
+  i tillegg til appens egne filer, og siden kan ikke bygges inn i andre nettsteder.
+- Nettleseren sjekker om appens filer er endret før den bruker en lagret kopi, så en oppdatering
+  når alle med en gang.
 - Serveren lytter bare på `127.0.0.1`. Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`,
   får cookiene `Secure`. Hver klient telles etter siste adresse i `X-Forwarded-For`, så proxyen må
   legge til klientens adresse der (nginx: `$proxy_add_x_forwarded_for`; Caddy gjør det selv).
@@ -91,7 +93,8 @@ Dette må på plass før appen legges ut på nett:
   standard (`proxy_request_buffering on`); i Caddy må `request_buffers 4KiB` settes under
   `reverse_proxy`. HTTPS trengs også for GPS på mobil og for `Secure`-cookies.
 - **Avklar kartfliser ved stor trafikk.** Kartverkets åpne flistjeneste (`cache.kartverket.no`)
-  er gratis, men gis uten garanti for oppetid, og Kartverket kan begrense svært tung bruk.
+  er gratis og oppført som åpne data under CC BY 4.0 i Geonorge, uten en publisert kvote. Den gis
+  uten garanti for oppetid, så avklar med Kartverket før appen får mye trafikk.
   Ved bytte av flisleverandør må adressen også inn i `img-src` i `CONTENT_SECURITY_POLICY`
   i `server.py`.
 
@@ -99,7 +102,8 @@ Dette må på plass før appen legges ut på nett:
 
 - Backend: standardbibliotek i Python (`http.server`, `sqlite3`) med JSON API
 - Frontend: HTML, CSS og JavaScript
-- Kart: Leaflet med Kartverkets topografiske kart (© Kartverket, CC BY 4.0)
+- Kart: Leaflet 1.9.4 (BSD-2-Clause, levert fra `web/vendor/`) med Kartverkets topografiske kart
+  (© Kartverket, CC BY 4.0)
 - Holdeplasser og linjer: inneholder data under norsk lisens for offentlige data (NLOD)
   tilgjengeliggjort av Entur
 

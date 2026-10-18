@@ -340,6 +340,11 @@ for path, status in (("/", 200), ("/app.js", 200), ("/api/config", 200), ("/miss
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"], path
     assert response.headers["X-Frame-Options"] == "DENY", path
     assert response.headers["X-Content-Type-Options"] == "nosniff", path
+    # Static files are checked for a newer version, so an update reaches every browser at once.
+    assert response.headers["Cache-Control"] == ("no-store" if path.startswith("/api/") else "no-cache"), path
+connection = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1])
+connection.request("GET", "/vendor/leaflet.js", headers={"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"})
+assert connection.getresponse().status == 304  # Unchanged: no new download.
 """)
 
     def test_every_failure_still_gets_an_http_answer(self):
