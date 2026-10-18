@@ -26,19 +26,19 @@
         <section class="card">
           <div class="section-head">
             <h2>Ny observasjon</h2>
-            <button id="locateBtn" class="ghost">Bruk min posisjon</button>
+            <button id="locateBtn" class="ghost" type="button">Bruk min posisjon</button>
           </div>
 
           <form id="reportForm">
             <label>
               Holdeplass
-              <input id="stopInput" name="stop_name" type="text" placeholder="Søk holdeplass eller trykk i kartet" list="stopOptions" autocomplete="off" />
+              <input id="stopInput" name="stop_name" type="text" placeholder="Søk holdeplass eller trykk i kartet" list="stopOptions" autocomplete="off" maxlength="80" />
               <datalist id="stopOptions"></datalist>
             </label>
 
             <label>
               Busslinje
-              <input id="routeInput" name="route" type="text" placeholder="For eksempel 100 eller M1" list="routeOptions" autocomplete="off" />
+              <input id="routeInput" name="route" type="text" placeholder="For eksempel 100 eller M1" list="routeOptions" autocomplete="off" maxlength="40" />
               <datalist id="routeOptions"></datalist>
             </label>
 
@@ -51,6 +51,7 @@
               <div>
                 <p class="meta-label">Rapportposisjon</p>
                 <p id="selectedLocation" class="meta-value">Ingen posisjon valgt ennå.</p>
+                <button id="centerBtn" class="ghost small" type="button">Bruk kartets midtpunkt</button>
               </div>
               <div>
                 <p class="meta-label">Nærmeste stopp</p>
@@ -59,7 +60,7 @@
             </div>
 
             <button type="submit" class="primary">Publiser observasjon</button>
-            <p id="formStatus" class="status"></p>
+            <p id="formStatus" class="status" role="status"></p>
           </form>
         </section>
 
@@ -68,6 +69,7 @@
             <h2>Aktive observasjoner</h2>
             <p id="ttlLabel" class="tiny"></p>
           </div>
+          <p id="feedStatus" class="status error" role="status"></p>
           <div id="feed" class="feed"></div>
         </section>
       </aside>
@@ -79,7 +81,7 @@
               <h2>Bee ID</h2>
               <p id="authState" class="tiny">Valgfritt</p>
             </div>
-            <button id="authToggle" class="ghost auth-toggle" type="button">Profil</button>
+            <button id="authToggle" class="ghost auth-toggle" type="button" aria-expanded="false" aria-controls="authContent">Profil</button>
           </div>
 
           <div id="authContent" class="hidden">
@@ -87,11 +89,11 @@
               <form id="loginForm" class="auth-form">
                 <label>
                   Brukernavn
-                  <input id="loginUsername" type="text" placeholder="brukernavn" autocomplete="username" />
+                  <input id="loginUsername" type="text" placeholder="brukernavn" autocomplete="username" required />
                 </label>
                 <label>
                   Passord
-                  <input id="loginPassword" type="password" placeholder="passord" autocomplete="current-password" />
+                  <input id="loginPassword" type="password" placeholder="passord" autocomplete="current-password" required />
                 </label>
                 <button type="submit" class="primary">Logg inn</button>
               </form>
@@ -99,11 +101,11 @@
               <form id="registerForm" class="auth-form">
                 <label>
                   Nytt brukernavn
-                  <input id="registerUsername" type="text" placeholder="ny bruker" autocomplete="username" />
+                  <input id="registerUsername" type="text" placeholder="3–24 tegn: a–z, 0–9, - og _" autocomplete="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_\-]+" title="3–24 tegn: a–z, tall, bindestrek og understrek" />
                 </label>
                 <label>
                   Nytt passord
-                  <input id="registerPassword" type="password" placeholder="minst 6 tegn" autocomplete="new-password" />
+                  <input id="registerPassword" type="password" placeholder="minst 6 tegn" autocomplete="new-password" required minlength="6" />
                 </label>
                 <button type="submit" class="ghost strong">Lag bruker</button>
               </form>
@@ -112,13 +114,13 @@
             <div id="userPanel" class="user-panel hidden">
               <p class="meta-value">Innlogget som <strong id="currentUsername"></strong></p>
               <div class="user-stats">
-                <span id="userLevel" class="pill">Level 1</span>
+                <span id="userLevel" class="pill">Nivå 1</span>
                 <span id="userXp" class="tiny">0 XP</span>
               </div>
               <button id="logoutBtn" class="ghost" type="button">Logg ut</button>
             </div>
 
-            <p id="authStatus" class="status"></p>
+            <p id="authStatus" class="status" role="status"></p>
           </div>
         </section>
 

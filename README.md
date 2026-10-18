@@ -40,6 +40,8 @@ værende. En like og XP-en den gir, lagres i samme transaksjon.
 
 - Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
 - Forespørsler kan være på maks 4 KB, og POST fra andre nettsteder avvises.
+- Alle svar har en Content-Security-Policy som bare slipper inn Leaflet fra unpkg og fliser fra
+  OpenStreetMap, og siden kan ikke bygges inn i andre nettsteder.
 - Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`, får cookiene `Secure`.
   Bak en proxy telles hver klient etter siste adresse i `X-Forwarded-For`.
 
@@ -51,12 +53,14 @@ Dette må på plass før appen legges ut på nett:
   klienter som sender data svært sakte («slowloris»). De kan holde alle 64 forbindelsene
   opptatt. Proxyen tar imot hele forespørselen før den sendes videre. HTTPS trengs også for
   GPS på mobil og for `Secure`-cookies.
-- **Egne kartfliser eller en flisleverandør.** `tile.openstreetmap.org` tillater ikke
-  produksjonstrafikk.
+- **Egne kartfliser eller en flisleverandør.** `tile.openstreetmap.org` gis uten garanti
+  for oppetid, og tung bruk kan blokkeres uten varsel
+  ([brukspolicy](https://operations.osmfoundation.org/policies/tiles/)). Ved bytte må
+  flisadressen også inn i `img-src` i `CONTENT_SECURITY_POLICY` i `server.py`.
 
 ## Teknisk
 
-- Backend: standardbibliotek i Python (`http.server` + JSON API)
+- Backend: standardbibliotek i Python (`http.server`, `sqlite3`) med JSON API
 - Frontend: HTML, CSS og JavaScript
 - Kart: Leaflet med OpenStreetMap-fliser
 
@@ -64,8 +68,9 @@ Dette må på plass før appen legges ut på nett:
 
 Trykk «Bruk min posisjon» og gi nettleseren tilgang til posisjonen din.
 Den blå markøren viser hvor du er, og sirkelen viser anslått nøyaktighet.
-Knappen flytter også rapportposisjonen til deg. Et klikk i kartet eller flytting
-av rapportmarkøren lar deg velge et annet sted uten at GPS overskriver valget.
+Knappen flytter også rapportposisjonen til deg. Et klikk i kartet, flytting av
+rapportmarkøren eller «Bruk kartets midtpunkt» lar deg velge et annet sted uten at GPS
+overskriver valget. Med tastatur flyttes kartet med piltastene.
 
 Lokasjon krever HTTPS, med unntak for `localhost` og `127.0.0.1` på samme enhet.
 Åpner du nettsiden på mobil via en vanlig HTTP-adresse på lokalnettet, vil

@@ -5,9 +5,9 @@ const map = L.map("map", {
 });
 map.setView([58.1467, 7.9956], 11);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
-  attribution: "&copy; OpenStreetMap-bidragsytere",
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-bidragsytere',
 }).addTo(map);
 
 const state = {
@@ -28,12 +28,14 @@ const stopInput = document.querySelector("#stopInput");
 const routeInput = document.querySelector("#routeInput");
 const noteInput = document.querySelector("#noteInput");
 const formStatus = document.querySelector("#formStatus");
+const feedStatus = document.querySelector("#feedStatus");
 const selectedLocation = document.querySelector("#selectedLocation");
 const nearestStop = document.querySelector("#nearestStop");
 const feed = document.querySelector("#feed");
 const stopOptions = document.querySelector("#stopOptions");
 const routeOptions = document.querySelector("#routeOptions");
 const locateBtn = document.querySelector("#locateBtn");
+const centerBtn = document.querySelector("#centerBtn");
 const ttlLabel = document.querySelector("#ttlLabel");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
@@ -60,6 +62,30 @@ async function fetchJson(url, options) {
   return response.json();
 }
 
+function postJson(url, body) {
+  return fetchJson(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// Only the newest request of each kind may update the page; older answers are dropped.
+const latest = { me: 0, sightings: 0, stop: 0, route: 0 };
+
+async function fetchLatest(kind, url) {
+  const request = ++latest[kind];
+  try {
+    const payload = await fetchJson(url);
+    return request === latest[kind] ? payload : null;
+  } catch (error) {
+    if (request === latest[kind]) {
+      throw error;
+    }
+    return null;
+  }
+}
+
 function formatAge(isoString) {
   const deltaMinutes = Math.max(0, Math.round((Date.now() - new Date(isoString).getTime()) / 60000));
   if (deltaMinutes < 1) {
@@ -71,6 +97,10 @@ function formatAge(isoString) {
   const hours = Math.floor(deltaMinutes / 60);
   const minutes = deltaMinutes % 60;
   return minutes ? `${hours} t ${minutes} min siden` : `${hours} t siden`;
+}
+
+function confirmations(count) {
+  return `${count} ${count === 1 ? "bekreftelse" : "bekreftelser"}`;
 }
 
 function escapeHtml(value) {
@@ -114,6 +144,13 @@ function markerAgeClass(isoString) {
 function toggleAuth(open = !state.authOpen) {
   state.authOpen = open;
   authContent.classList.toggle("hidden", !open);
+  authToggle.setAttribute("aria-expanded", String(open));
+}
+
+function setUser(user, stats = null) {
+  state.user = user;
+  state.stats = stats;
+  updateAuthUi();
 }
 
 function updateAuthUi() {
@@ -122,8 +159,8 @@ function updateAuthUi() {
   userPanel.classList.toggle("hidden", !loggedIn);
   authState.textContent = loggedIn ? "Frivillig profil aktiv" : "Valgfritt";
   currentUsername.textContent = loggedIn ? state.user.username : "";
-  userLevel.textContent = `Level ${state.stats?.level ?? 1}`;
-  userXp.textContent = `${state.stats?.xp ?? 0} XP · ${state.stats?.likes_received ?? 0} likes`;
+  userLevel.textContent = `Nivå ${state.stats?.level ?? 1}`;
+  userXp.textContent = `${state.stats?.xp ?? 0} XP · ${confirmations(state.stats?.likes_received ?? 0)}`;
 }
 
 function updateSelection(lat, lon) {
@@ -134,14 +171,15 @@ function updateSelection(lat, lon) {
       draggable: true,
       icon: makeIcon("bee-dot"),
     }).addTo(map);
-    state.selectionMarker.on("dragend", (event) => {
-      const point = event.target.getLatLng();
-      updateSelection(point.lat, point.lng);
-      loadNearbyStop(point.lat, point.lng);
-    });
+    state.selectionMarker.on("dragend", (event) => selectPoint(event.target.getLatLng()));
   } else {
     state.selectionMarker.setLatLng([lat, lon]);
   }
+}
+
+function selectPoint({ lat, lng }) {
+  updateSelection(lat, lng);
+  loadNearbyStop(lat, lng);
 }
 
 function updateCurrentLocation(lat, lon, accuracy) {
@@ -170,6 +208,8 @@ function updateCurrentLocation(lat, lon, accuracy) {
 }
 
 function renderFeed(items) {
+  // The list is rebuilt on every refresh, so keyboard focus returns to the same like button.
+  const focusedId = document.activeElement?.dataset?.likeId;
   if (!items.length) {
     feed.innerHTML = "<p class='tiny'>Ingen aktive observasjoner akkurat nå.</p>";
     return;
@@ -187,7 +227,7 @@ function renderFeed(items) {
           ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
           <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
           <div class="feed-actions">
-            <span class="tiny">${item.distance_to_stop_m ? `${item.distance_to_stop_m} m fra nærmeste stopp` : "Posisjon manuelt valgt"}</span>
+            <span class="tiny">${item.distance_to_stop_m != null ? `${item.distance_to_stop_m} m fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
             <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
               ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
             </button>
@@ -196,22 +236,39 @@ function renderFeed(items) {
       `
     )
     .join("");
+  if (focusedId) {
+    feed.querySelector(`[data-like-id="${CSS.escape(focusedId)}"]`)?.focus();
+  }
 }
 
+// Markers are updated in place, so a refresh does not close an open popup.
+const sightingMarkers = new Map();
+
 function renderSightings(items) {
-  state.sightingsLayer.clearLayers();
+  const current = new Set(items.map((item) => item.id));
+  sightingMarkers.forEach((marker, id) => {
+    if (!current.has(id)) {
+      state.sightingsLayer.removeLayer(marker);
+      sightingMarkers.delete(id);
+    }
+  });
 
   items.forEach((item) => {
-    const marker = L.marker([item.lat, item.lon], {
-      icon: makeIcon(markerAgeClass(item.created_at)),
-    });
-    marker.bindPopup(`
+    const ageClass = markerAgeClass(item.created_at);
+    let marker = sightingMarkers.get(item.id);
+    if (!marker) {
+      marker = L.marker([item.lat, item.lon], { icon: makeIcon(ageClass) }).bindPopup("").addTo(state.sightingsLayer);
+      sightingMarkers.set(item.id, marker);
+    } else if (marker.ageClass !== ageClass) {
+      marker.setIcon(makeIcon(ageClass));
+    }
+    marker.ageClass = ageClass;
+    marker.setPopupContent(`
       <strong>${escapeHtml(item.stop_name || "Ukjent sted")}</strong><br />
       ${item.route ? `Linje ${escapeHtml(item.route)}<br />` : ""}
       ${item.note ? `${escapeHtml(item.note)}<br />` : ""}
-      <span>${item.likes_count} bekreftelser · ${escapeHtml(item.reporter || "Anonym")} · ${formatAge(item.created_at)}</span>
+      <span>${confirmations(item.likes_count)} · ${escapeHtml(item.reporter || "Anonym")} · ${formatAge(item.created_at)}</span>
     `);
-    marker.addTo(state.sightingsLayer);
   });
 }
 
@@ -221,60 +278,72 @@ async function loadConfig() {
 }
 
 async function loadCurrentUser() {
-  const payload = await fetchJson("/api/me");
-  state.user = payload.user;
-  state.stats = payload.stats;
-  updateAuthUi();
+  const payload = await fetchLatest("me", "/api/me");
+  if (payload) {
+    setUser(payload.user, payload.stats);
+  }
 }
 
 async function loadSightings() {
-  const payload = await fetchJson("/api/sightings");
-  renderFeed(payload.items);
-  renderSightings(payload.items);
+  const payload = await fetchLatest("sightings", "/api/sightings");
+  if (payload) {
+    feedStatus.textContent = "";
+    renderFeed(payload.items);
+    renderSightings(payload.items);
+  }
 }
 
-// Only the newest position change or stop search may fill in the stop; older answers are dropped.
-let stopRequest = 0;
+const refresh = () => Promise.all([loadSightings(), loadCurrentUser()]);
+// Load errors are shown by the list, so they never hide the result of an action.
+const showLoadError = (error) => {
+  feedStatus.textContent = error.message;
+};
 
+// Position changes and stop searches share one counter: only the newest may fill in the stop.
 async function loadNearbyStop(lat, lon) {
-  const request = ++stopRequest;
   nearestStop.textContent = "Laster...";
   stopInput.value = "";
   stopInput.dataset.stopId = "";
   try {
-    const payload = await fetchJson(`/api/stops/nearby?lat=${lat}&lon=${lon}`);
-    if (request !== stopRequest) {
+    const payload = await fetchLatest("stop", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
+    if (!payload) {
       return;
     }
     const [closest] = payload.items;
     if (!closest) {
-      nearestStop.textContent = "Fant ingen holdeplass.";
+      nearestStop.textContent = "Fant ingen holdeplass innen 2 km.";
       return;
     }
     nearestStop.textContent = `${closest.name} (${closest.distance_m} m)`;
     stopInput.value = closest.name;
     stopInput.dataset.stopId = closest.id;
   } catch (error) {
-    if (request === stopRequest) {
-      nearestStop.textContent = error.message;
-    }
+    nearestStop.textContent = error.message;
   }
 }
 
-function renderOptions(datalistEl, items, toLabel) {
-  datalistEl.innerHTML = items
-    .map((item) => `<option value="${escapeHtml(toLabel(item))}"></option>`)
-    .join("");
+function renderOptions(datalistEl, labels) {
+  datalistEl.innerHTML = labels.map((label) => `<option value="${escapeHtml(label)}"></option>`).join("");
 }
 
-async function likeSighting(id) {
-  await fetchJson(`/api/sightings/${encodeURIComponent(id)}/like`, {
-    method: "POST",
-  });
-  await loadSightings();
-  if (state.user) {
-    await loadCurrentUser();
-  }
+// Stops that share a name get their platform, or else their ID, so each option is one stop.
+function stopChoices(stops) {
+  const count = (values, value) => values.filter((other) => other === value).length;
+  const names = stops.map((stop) => stop.name);
+  const labels = stops.map((stop) =>
+    count(names, stop.name) > 1 && stop.platform ? `${stop.name} (plattform ${stop.platform})` : stop.name
+  );
+  return stops.map((stop, index) => ({
+    stop,
+    label: count(labels, labels[index]) > 1 ? `${stop.name} (${stop.id})` : labels[index],
+  }));
+}
+
+function selectStop({ stop, label }) {
+  updateSelection(stop.lat, stop.lon);
+  map.panTo([stop.lat, stop.lon]);
+  nearestStop.textContent = `${label} (valgt)`;
+  stopInput.dataset.stopId = stop.id;
 }
 
 function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
@@ -288,8 +357,6 @@ function handleLocationUpdate(position, shouldCenter = false, selectLocation = f
     map.flyTo([latitude, longitude], 14);
     state.hasAutoCentered = true;
   }
-  locateBtn.disabled = false;
-  setStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
 }
 
 function startLocationTracking(selectLocation = false) {
@@ -300,7 +367,11 @@ function startLocationTracking(selectLocation = false) {
 
   locateBtn.disabled = true;
   navigator.geolocation.getCurrentPosition(
-    (position) => handleLocationUpdate(position, true, selectLocation),
+    (position) => {
+      locateBtn.disabled = false;
+      setStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
+      handleLocationUpdate(position, true, selectLocation);
+    },
     () => {
       locateBtn.disabled = false;
       setStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
@@ -322,32 +393,46 @@ function startLocationTracking(selectLocation = false) {
   );
 }
 
+let shownStops = [];
+
 stopInput.addEventListener("input", async () => {
-  const request = ++stopRequest;
   const query = stopInput.value.trim();
   stopInput.dataset.stopId = "";
-  if (query.length < 2) {
-    stopOptions.innerHTML = "";
+  // A picked option is matched against the list it came from; its label may not be searchable.
+  const picked = shownStops.find((choice) => choice.label === query);
+  if (picked) {
+    latest.stop++;
+    selectStop(picked);
     return;
   }
-  const payload = await fetchJson(`/api/stops/search?q=${encodeURIComponent(query)}`);
-  if (request !== stopRequest) {
-    return;
-  }
-  renderOptions(stopOptions, payload.items, (item) => item.name);
-  const exact = payload.items.find((item) => item.name === query);
-  if (exact) {
-    updateSelection(exact.lat, exact.lon);
-    map.panTo([exact.lat, exact.lon]);
-    nearestStop.textContent = `${exact.name} (valgt)`;
-    stopInput.dataset.stopId = exact.id;
+  try {
+    const payload = await fetchLatest("stop", `/api/stops/search?q=${encodeURIComponent(query)}`);
+    if (!payload) {
+      return;
+    }
+    shownStops = stopChoices(payload.items);
+    renderOptions(stopOptions, shownStops.map((choice) => choice.label));
+    const exact = shownStops.find((choice) => choice.label === query);
+    if (exact) {
+      selectStop(exact);
+    }
+  } catch (error) {
+    shownStops = [];
+    renderOptions(stopOptions, []);
+    nearestStop.textContent = error.message;
   }
 });
 
 routeInput.addEventListener("input", async () => {
-  const query = routeInput.value.trim();
-  const payload = await fetchJson(`/api/routes?q=${encodeURIComponent(query)}`);
-  renderOptions(routeOptions, payload.items, (item) => item.short_name);
+  try {
+    const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
+    if (payload) {
+      renderOptions(routeOptions, payload.items.map((item) => item.short_name || item.long_name));
+    }
+  } catch (error) {
+    renderOptions(routeOptions, []);
+    setStatus(error.message, "error");
+  }
 });
 
 feed.addEventListener("click", async (event) => {
@@ -355,20 +440,19 @@ feed.addEventListener("click", async (event) => {
   if (!button) {
     return;
   }
-  button.disabled = true;
+  // A like is idempotent on the server, so the button stays enabled and keeps keyboard focus.
   try {
-    await likeSighting(button.dataset.likeId);
+    await fetchJson(`/api/sightings/${encodeURIComponent(button.dataset.likeId)}/like`, { method: "POST" });
   } catch (error) {
     setStatus(error.message, "error");
-  } finally {
-    button.disabled = false;
+    return;
   }
+  refresh().catch(showLoadError);
 });
 
-map.on("click", async (event) => {
-  updateSelection(event.latlng.lat, event.latlng.lng);
-  await loadNearbyStop(event.latlng.lat, event.latlng.lng);
-});
+map.on("click", (event) => selectPoint(event.latlng));
+
+centerBtn.addEventListener("click", () => selectPoint(map.getCenter()));
 
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);
@@ -385,98 +469,69 @@ reportForm.addEventListener("submit", async (event) => {
   submitButton.disabled = true;
   setStatus("Publiserer...");
 
+  let item;
   try {
-    await fetchJson("/api/sightings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        lat: state.selectedLatLng.lat,
-        lon: state.selectedLatLng.lon,
-        stop_name: stopInput.value.trim(),
-        stop_id: stopInput.dataset.stopId || "",
-        route: routeInput.value.trim(),
-        note: noteInput.value.trim(),
-      }),
+    item = await postJson("/api/sightings", {
+      lat: state.selectedLatLng.lat,
+      lon: state.selectedLatLng.lon,
+      stop_name: stopInput.value.trim(),
+      stop_id: stopInput.dataset.stopId || "",
+      route: routeInput.value.trim(),
+      note: noteInput.value.trim(),
     });
-
-    noteInput.value = "";
-    setStatus(state.user ? "Observasjonen er publisert på profilen din." : "Observasjonen er publisert anonymt.", "ok");
-    await loadSightings();
-    if (state.user) {
-      await loadCurrentUser();
-    }
   } catch (error) {
     setStatus(error.message, "error");
+    return;
   } finally {
     submitButton.disabled = false;
   }
+  noteInput.value = "";
+  setStatus(
+    item.reporter === "Anonym" ? "Observasjonen er publisert anonymt." : `Observasjonen er publisert som ${item.reporter}.`,
+    "ok"
+  );
+  refresh().catch(showLoadError);
 });
 
 authToggle.addEventListener("click", () => {
   toggleAuth();
 });
 
-loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const username = document.querySelector("#loginUsername").value.trim();
-  const password = document.querySelector("#loginPassword").value;
-  try {
-    await fetchJson("/api/auth/login", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ username, password }),
-    });
-    await loadCurrentUser();
-    await loadSightings();
-    toggleAuth(true);
-    setAuthStatus("Innlogging vellykket.", "ok");
-    loginForm.reset();
-  } catch (error) {
-    setAuthStatus(error.message, "error");
-  }
-});
+function handleAuthForm(form, url, message) {
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const [username, password] = form.querySelectorAll("input");
+    try {
+      const payload = await postJson(url, { username: username.value.trim(), password: password.value });
+      setUser(payload.user);
+    } catch (error) {
+      setAuthStatus(error.message, "error");
+      return;
+    }
+    setAuthStatus(message, "ok");
+    form.reset();
+    refresh().catch(showLoadError);
+  });
+}
 
-registerForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const username = document.querySelector("#registerUsername").value.trim();
-  const password = document.querySelector("#registerPassword").value;
-  try {
-    await fetchJson("/api/auth/register", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ username, password }),
-    });
-    await loadCurrentUser();
-    await loadSightings();
-    toggleAuth(true);
-    setAuthStatus("Profil opprettet.", "ok");
-    registerForm.reset();
-  } catch (error) {
-    setAuthStatus(error.message, "error");
-  }
-});
+handleAuthForm(loginForm, "/api/auth/login", "Innlogging vellykket.");
+handleAuthForm(registerForm, "/api/auth/register", "Profil opprettet.");
 
 logoutBtn.addEventListener("click", async () => {
-  await fetchJson("/api/auth/logout", {
-    method: "POST",
-  });
-  state.user = null;
-  state.stats = null;
-  updateAuthUi();
+  try {
+    await fetchJson("/api/auth/logout", { method: "POST" });
+  } catch (error) {
+    setAuthStatus(error.message, "error");
+    return;
+  }
+  setUser(null);
   setAuthStatus("Du er logget ut. Observasjoner kan fortsatt sendes anonymt.", "ok");
-  await loadSightings();
+  refresh().catch(showLoadError);
 });
 
 // Each part starts on its own, so one failed request cannot stop GPS or refreshing.
-const showLoadError = (error) => setStatus(error.message, "error");
 loadConfig().catch(showLoadError);
 loadCurrentUser().catch((error) => setAuthStatus(error.message, "error"));
 loadSightings().catch(showLoadError);
 startLocationTracking();
-setInterval(() => Promise.all([loadSightings(), loadCurrentUser()]).catch(showLoadError), 20000);
+setInterval(() => refresh().catch(showLoadError), 20000);

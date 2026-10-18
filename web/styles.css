@@ -189,6 +189,12 @@ button:disabled {
   background: linear-gradient(135deg, rgba(247, 198, 0, 0.18), rgba(17, 63, 138, 0.08));
 }
 
+.ghost.small {
+  margin-top: 8px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
 .meta-label {
   margin: 0 0 6px;
   font-size: 0.82rem;
@@ -200,6 +206,8 @@ button:disabled {
 }
 
 .feed-item {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: grid;
   gap: 10px;
   padding: 14px;
@@ -317,6 +325,7 @@ button:disabled {
 
 .leaflet-popup-content {
   font-family: var(--font-body);
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 900px) {
