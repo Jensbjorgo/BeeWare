@@ -455,6 +455,7 @@ const showLoadError = (error) => {
 // Empties the stop field, and outdates its pending searches and suggestions.
 function clearStop() {
   outdate("stop");
+  stopSearch = Promise.resolve(); // A failed search no longer stops publishing.
   stopSuggestions.close();
   stopInput.value = "";
   stopInput.dataset.stopId = "";
@@ -642,6 +643,7 @@ async function searchStop() {
   } catch (error) {
     stopSuggestions.show([]);
     nearestStop.textContent = error.message;
+    return false; // Publishing stops rather than send this name with a position it may not belong to.
   }
 }
 
@@ -689,10 +691,16 @@ reportForm.addEventListener("submit", async (event) => {
   // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
   const failuresBefore = gpsButtonFailures;
   let waits;
+  let searchFound;
   do {
     waits = [stopSearch, gpsWait];
-    await Promise.all(waits);
+    [searchFound] = await Promise.all(waits);
   } while (waits[0] !== stopSearch || waits[1] !== gpsWait);
+  if (searchFound === false) {
+    submitButton.disabled = false;
+    setStatus("Holdeplassøket feilet, så observasjonen ble ikke sendt. Prøv igjen, eller velg et sted i kartet.", "error");
+    return;
+  }
   if (gpsButtonFailures !== failuresBefore) {
     submitButton.disabled = false;
     setStatus("Fant ikke posisjonen din. Velg et sted i kartet eller trykk «Bruk min posisjon» igjen.", "error");

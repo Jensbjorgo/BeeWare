@@ -610,6 +610,29 @@ test("a report waiting for the GPS button is not sent from the old spot when GPS
   assert.equal(posted.lat, 63.4168);
 });
 
+test("a failed stop search stops publishing until the user searches again or picks a spot", async () => {
+  let posted;
+  const app = await setup((url, options) => {
+    if (url.startsWith("/api/stops/search")) return reply({ error: "Serveren er opptatt." }, false);
+    if (options?.method === "POST") {
+      posted = JSON.parse(options.body);
+      return reply({ reporter: "Anonym" });
+    }
+  });
+  for (const id of ["#routeInput", "#noteInput"]) app.element(id).value = "";
+  app.updateSelection(63.436, 10.4006);
+  const stop = app.element("#stopInput");
+  stop.value = "Gløshaugen";
+  stop.input();
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.equal(posted, undefined);  // "Gløshaugen" would be stored at Trondheim S.
+  assert.match(app.element("#formStatus").textContent, /Holdeplassøket feilet/);
+  app.updateSelection(63.4168, 10.4076);
+  await app.loadNearbyStop(63.4168, 10.4076);  // A spot picked on the map.
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.equal(posted.lat, 63.4168);
+});
+
 test("typing a stop drops a GPS stop lookup still waiting its turn", async () => {
   const lookups = [];
   const app = await setup((url) => {
