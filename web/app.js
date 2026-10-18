@@ -653,7 +653,11 @@ routeInput.addEventListener("input", async () => {
   const setRouteStatus = lateStatus();
   routeSuggestions.typed();
   try {
-    const payload = await fetchLatest("route", `/api/routes?q=${encodeURIComponent(routeInput.value.trim())}`);
+    // Lines stopping near the report come first, so "3" by Gløshaugen is AtB's line 3.
+    const center = map.wrapLatLng(map.getCenter());
+    const { lat, lon } = state.selectedLatLng ?? { lat: center.lat, lon: center.lng };
+    const query = encodeURIComponent(routeInput.value.trim());
+    const payload = await fetchLatest("route", `/api/routes?q=${query}&lat=${lat}&lon=${lon}`);
     if (payload) {
       routeSuggestions.show(payload.items); // Each value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
     }

@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +107,14 @@ ATB:Line:31,ATB,31,Lade - Tiller
 RUT:Line:310,RUT,310,Ski - Oslo
 AKT:Line:1,AKT,48,Høllen - Nodelandsheia
 AKT:Line:2,AKT,48,Tangvall - Hortemo
+AKT:Line:3,AKT,48,Tangvall - Hortemo
+"""
+        # Which lines stop where, as update_data.py writes it. AKT:Line:3 is listed as AKT:Line:2.
+        stop_routes = """stop_id,route_id
+NSR:StopPlace:1,RUT:Line:31
+NSR:StopPlace:2,ATB:Line:31
+NSR:StopPlace:5,AKT:Line:3
+NSR:StopPlace:5,GONE:Line:1
 """
         agencies = "agency_id,agency_name\nRUT,Ruter\nATB,AtB\nAKT,Agder\n"
         run_in_copy(self, """
@@ -147,7 +156,33 @@ assert [r["value"] for r in data.search_routes("48")] == ["48 Høllen - Nodeland
 items = request("GET", "/api/stops/search?q=sentrum&lat=63.43&lon=10.39")[1]["items"]
 assert items[0]["id"] == "NSR:StopPlace:2" and items[0]["distance_m"] == 250, items  # To platform 21.
 assert request("GET", "/api/stops/search?q=sentrum&lat=nan&lon=10")[0] == 200
-""", data={"stops.txt": stops, "routes.txt": routes, "agency.txt": agencies})
+# Lines stopping near the report come first: line 31 by Jernbanetorget is Ruter's, in Trondheim AtB's.
+assert [r["value"] for r in data.search_routes("31", oslo)] == ["31 · Ruter", "31 · AtB", "310 · Ruter"]
+assert [r["value"] for r in data.search_routes("31", trondheim)] == ["31 · AtB", "31 · Ruter", "310 · Ruter"]
+assert [r["value"] for r in data.search_routes("48", (59.9270, 10.9550))][0] == "48 Tangvall - Hortemo · Agder"
+assert [r["value"] for r in data.search_routes("ruter 3", trondheim)] == ["31 · Ruter", "310 · Ruter"]
+items = request("GET", "/api/routes?q=31&lat=63.43&lon=10.39")[1]["items"]
+assert [r["value"] for r in items] == ["31 · AtB", "31 · Ruter", "310 · Ruter"], items
+""", data={"stops.txt": stops, "routes.txt": routes, "agency.txt": agencies, "stop_routes.txt": stop_routes})
+
+
+class UpdateDataTests(unittest.TestCase):
+    def test_lines_count_at_the_station_where_they_stop(self):
+        sys.path.insert(0, str(ROOT))
+        import update_data
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "feed.zip"
+            with zipfile.ZipFile(path, "w") as feed:
+                feed.writestr("stops.txt", "\ufeffstop_id,parent_station\nS,\nQ1,S\nQ2,S\nX,\n")
+                feed.writestr("trips.txt", "route_id,trip_id\nL1,T1\nL2,T2\n")
+                # T1 passes X without stopping; T3 belongs to no known trip.
+                feed.writestr(
+                    "stop_times.txt",
+                    "trip_id,stop_id,pickup_type,drop_off_type\nT1,Q1,,\nT1,X,1,1\nT2,Q2,0,1\nT2,X,,\nT3,X,,\n",
+                )
+            with zipfile.ZipFile(path) as feed:
+                self.assertEqual(update_data.stop_routes(feed), [("S", "L1"), ("S", "L2"), ("X", "L2")])
 
 
 class RegressionTests(unittest.TestCase):

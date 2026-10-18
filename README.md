@@ -10,8 +10,9 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
 - Dekker fastlands-Norge med Kartverkets topografiske kart og Enturs nasjonale holdeplass- og linjedata.
 - Henter nærmeste holdeplass innen 2 km, målt til nærmeste plattform.
 - Søker holdeplasser med eksakte navn først og deretter de nærmeste treffene.
-- Søker linjer med nummer, navn og operatør (for eksempel «31 Ruter»). Observasjonen får nummer og
-  operatør («31 · Ruter»), eller hele linjenavnet når operatøren har flere linjer med samme nummer.
+- Søker linjer med nummer, navn og operatør (for eksempel «31 Ruter»), med linjene som stopper nær
+  rapportposisjonen først. Observasjonen får nummer og operatør («31 · Ruter»), eller hele
+  linjenavnet når operatøren har flere linjer med samme nummer.
 - Viser alle treff i en egen forslagsliste som kan brukes med piltaster, Enter og Escape. Gir
   holdeplassøket treff, må ett av dem velges før publisering; uten treff lagres navnet slik det er
   skrevet, på rapportposisjonen.
@@ -32,18 +33,17 @@ Kartet krever internettilgang og starter over Oslo til GPS-en finner brukeren.
 
 ## Holdeplass- og linjedata
 
-Dataene følger ikke med repositoryet. Hent Enturs nasjonale GTFS-datasett (omtrent 95 MB)
-og pakk ut de tre filene appen bruker:
+Dataene følger ikke med repositoryet. Dette henter Enturs nasjonale GTFS-datasett (omtrent 95 MB)
+og skriver filene appen bruker til `data/`:
 
 ```bash
-mkdir -p data
-curl -fL -o data/gtfs.zip https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_norway-aggregated-gtfs-basic.zip
-unzip -o data/gtfs.zip stops.txt routes.txt agency.txt -d data
-rm data/gtfs.zip
+python3 update_data.py
 ```
 
-Start serveren på nytt etterpå. Entur oppdaterer datasettet hver natt; det holder å hente
-det når holdeplasser eller linjer er endret, og ikke oftere enn én gang i døgnet.
+Skriptet tar vare på holdeplasser, linjer og operatører, og bygger `stop_routes.txt` over hvilke
+linjer som stopper hvor ut fra alle turene i rutetabellene (omtrent 10 sekunder). De gamle filene
+blir liggende til de nye er ferdige. Start serveren på nytt etterpå. Entur oppdaterer datasettet
+hver natt, så skriptet kan kjøres som en nattlig jobb, men ikke oftere enn én gang i døgnet.
 Uten filene fungerer kart og rapportering fortsatt, men holdeplass- og linjesøk gir ingen
 treff. Sted og linje kan da skrives inn manuelt.
 
@@ -53,6 +53,11 @@ skilles de med transportmiddel, beskrivelse og avstand, som «Jernbanetorget (tr
 157 m)». Avstanden og posisjonen et søkevalg gir, er til stasjonens plattform nærmest kartets
 midtpunkt. Avstander regnes på WGS84-ellipsoiden, samme datum som GPS og Entur, og er nøyaktige
 på centimeteren innen 2 km.
+
+Linjesøket viser først linjer med et linjenummer som begynner med det som er skrevet. Innenfor dem
+kommer linjene som stopper innen 500 m fra rapportposisjonen (eller kartets midtpunkt før et sted er
+valgt), så linjene innen 30 km og til slutt resten av landet. «3» ved Gløshaugen gir dermed AtBs
+linje 3, og ved Jernbanetorget Ruters T-banelinje 3.
 
 Kartverkets topografiske kart går til 71,5° N og dekker dermed ikke Svalbard eller Jan Mayen.
 Entur-dataene har heller ingen holdeplasser der.

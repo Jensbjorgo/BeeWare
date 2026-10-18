@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -35,6 +35,10 @@ STOP_SEARCH_LIMIT = 12
 ROUTE_SEARCH_LIMIT = 20
 NEARBY_STOP_LIMIT = 6
 NEARBY_RADIUS_KM = 2.0
+# The line search lists lines stopping within ROUTE_NEAR_KM of the report first, then those
+# stopping within ROUTE_AREA_KM, such as the rest of Oslo or Trondheim.
+ROUTE_NEAR_KM = 0.5
+ROUTE_AREA_KM = 30.0
 # WGS84, the datum of GTFS and GPS coordinates.
 WGS84_A_KM = 6378.137
 WGS84_F = 1 / 298.257223563
@@ -110,12 +114,12 @@ def parse_coordinate(value: Any, limit: float) -> float:
     return number
 
 
-def read_gtfs(path: Path) -> list[dict[str, str]]:
+def read_gtfs(path: Path) -> Iterator[dict[str, str]]:
     if not path.is_file():
-        return []
+        return
     # utf-8-sig: GTFS files may start with a byte order mark.
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        return list(csv.DictReader(handle))
+        yield from csv.DictReader(handle)
 
 
 class TransitData:
@@ -132,10 +136,15 @@ class TransitData:
         self.point_lats: list[float] = []
         self.platforms: defaultdict[str, list[tuple[float, float]]] = defaultdict(list)  # stop id -> points
         self.route_index: list[dict[str, str]] = []
+        self.stop_routes: defaultdict[str, set[str]] = defaultdict(set)  # stop id -> ids of lines stopping there
         self._load_stops(read_gtfs(data_dir / "stops.txt"))
-        self._load_routes(read_gtfs(data_dir / "routes.txt"), read_gtfs(data_dir / "agency.txt"))
+        aliases = self._load_routes(read_gtfs(data_dir / "routes.txt"), read_gtfs(data_dir / "agency.txt"))
+        # Written by update_data.py from every trip in the feed.
+        for row in read_gtfs(data_dir / "stop_routes.txt"):
+            if row.get("route_id") in aliases:
+                self.stop_routes[row.get("stop_id") or ""].add(aliases[row["route_id"]])
 
-    def _load_stops(self, rows: list[dict[str, str]]) -> None:
+    def _load_stops(self, rows: Iterable[dict[str, str]]) -> None:
         parsed = []
         for row in rows:
             try:
@@ -168,21 +177,27 @@ class TransitData:
             for stop in self.stops_by_id.values()
         ]
 
-    def _load_routes(self, rows: list[dict[str, str]], agencies: list[dict[str, str]]) -> None:
+    def _load_routes(self, rows: Iterable[dict[str, str]], agencies: Iterable[dict[str, str]]) -> dict[str, str]:
+        """Loads the line list and returns each route id mapped to the id of the line it is listed as."""
         agency_names = {row.get("agency_id") or "": compact_whitespace(row.get("agency_name") or "") for row in agencies}
-        seen: set[tuple[str, str, str]] = set()
+        seen: dict[tuple[str, str, str], str] = {}
+        aliases: dict[str, str] = {}
         for row in rows:
+            route_id = row.get("route_id") or ""
             short_name = compact_whitespace(row.get("route_short_name") or "")
             long_name = compact_whitespace(row.get("route_long_name") or "")
             agency = agency_names.get(row.get("agency_id") or "", "")
             key = (short_name.casefold(), long_name.casefold(), agency.casefold())
-            if not (short_name or long_name) or key in seen:  # GTFS requires one of the names.
+            if not (short_name or long_name):  # GTFS requires one of the names.
                 continue
-            seen.add(key)
+            if key in seen:  # Identical lines are listed once.
+                aliases[route_id] = seen[key]
+                continue
+            seen[key] = aliases[route_id] = route_id
             name = f"{short_name} {long_name}".strip()
             self.route_index.append(
                 {
-                    "id": row.get("route_id") or "",
+                    "id": route_id,
                     "short_name": short_name,
                     "long_name": long_name,
                     "agency": agency,
@@ -195,6 +210,7 @@ class TransitData:
         for route in self.route_index:
             unique = route["short_name"] and numbers[route["short_name"].casefold(), route["agency"].casefold()] == 1
             route["value"] = " · ".join(filter(None, (route["short_name"], route["agency"]))) if unique else route["label"]
+        return aliases
 
     def search_stops(
         self, query: str, near: tuple[float, float] | None = None, limit: int = STOP_SEARCH_LIMIT
@@ -225,16 +241,30 @@ class TransitData:
             scored.append((quality, distance, name, stop["id"], stop))
         return [item[-1] for item in heapq.nsmallest(limit, scored, key=lambda item: item[:4])]
 
-    def search_routes(self, query: str, limit: int = ROUTE_SEARCH_LIMIT) -> list[dict[str, str]]:
-        """Every word must match, as in "31 AtB". Line numbers equal to the first word come first,
-        then those that start with it."""
+    def search_routes(
+        self, query: str, near: tuple[float, float] | None = None, limit: int = ROUTE_SEARCH_LIMIT
+    ) -> list[dict[str, str]]:
+        """Every word must match, as in "31 AtB".
+
+        Line numbers that start with one of the words come before other matches. Within those groups,
+        lines stopping near `near` come first, then the rest of the area, then the rest of Norway;
+        and within each of these an equal line number before longer ones, then the closest line.
+        """
         words = compact_whitespace(query).casefold().split()
         if not words:
             return []
+        route_km: dict[str, float] = {}  # line id -> km from `near` to its closest stop
+        for stop_id, km in (self._nearest_platforms(*near, ROUTE_AREA_KM) if near else {}).items():
+            for route_id in self.stop_routes.get(stop_id, ()):
+                if km < route_km.get(route_id, math.inf):
+                    route_km[route_id] = km
 
-        def rank(route: dict[str, str]) -> tuple[int, str]:
+        def rank(route: dict[str, str]) -> tuple[bool, int, int, float, str]:
             short_name = route["short_name"].casefold()
-            return (0 if short_name == words[0] else 1 if short_name.startswith(words[0]) else 2, route["label"])
+            number = 0 if short_name in words else 1 if short_name.startswith(tuple(words)) else 2
+            km = route_km.get(route["id"], math.inf)
+            area = 0 if km <= ROUTE_NEAR_KM else 1 if km <= ROUTE_AREA_KM else 2
+            return (number == 2, area, number, km, route["label"])
 
         matches = [route for route in self.route_index if all(word in route["label"].casefold() for word in words)]
         return heapq.nsmallest(limit, matches, key=rank)
@@ -242,10 +272,18 @@ class TransitData:
     def find_nearby_stops(
         self, lat: float, lon: float, limit: int = NEARBY_STOP_LIMIT
     ) -> list[dict[str, Any]]:
+        nearest = self._nearest_platforms(lat, lon, NEARBY_RADIUS_KM)
+        return [
+            {**self.stops_by_id[stop_id], "distance_m": round(distance * 1000)}
+            for stop_id, distance in heapq.nsmallest(limit, nearest.items(), key=lambda item: item[1])
+        ]
+
+    def _nearest_platforms(self, lat: float, lon: float, radius_km: float) -> dict[str, float]:
+        """Stops with a platform within the radius, mapped to the distance to their nearest one in km."""
         # Only boarding points inside this latitude and longitude band can be within the radius.
         # ponytail: the band ignores the 180th meridian, which no Norwegian stop is near.
         # A degree of latitude is shortest at the equator (radius a(1-f)²), so the band is never too narrow.
-        dlat = math.degrees(NEARBY_RADIUS_KM / (WGS84_A_KM * (1 - WGS84_F) ** 2))
+        dlat = math.degrees(radius_km / (WGS84_A_KM * (1 - WGS84_F) ** 2))
         dlon = dlat / math.cos(math.radians(min(abs(lat) + dlat, 89.9)))
         first = bisect.bisect_left(self.point_lats, lat - dlat)
         last = bisect.bisect_right(self.point_lats, lat + dlat)
@@ -253,12 +291,9 @@ class TransitData:
         for point_lat, point_lon, stop_id in self.points[first:last]:
             if abs(point_lon - lon) <= dlon:
                 distance = distance_km(lat, lon, point_lat, point_lon)
-                if distance <= NEARBY_RADIUS_KM and distance < nearest.get(stop_id, math.inf):
+                if distance <= radius_km and distance < nearest.get(stop_id, math.inf):
                     nearest[stop_id] = distance
-        return [
-            {**self.stops_by_id[stop_id], "distance_m": round(distance * 1000)}
-            for stop_id, distance in heapq.nsmallest(limit, nearest.items(), key=lambda item: item[1])
-        ]
+        return nearest
 
 
 SCHEMA = """
@@ -581,8 +616,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/routes":
-            query = params.get("q", [""])[0]
-            self.send_json({"items": transit_data.search_routes(query)})
+            try:
+                near = (parse_coordinate(params["lat"][0], 90), parse_coordinate(params["lon"][0], 180))
+            except (KeyError, ValueError):
+                near = None  # The position only ranks the results.
+            self.send_json({"items": transit_data.search_routes(params.get("q", [""])[0], near)})
             return
 
         self.send_json({"error": "Ukjent adresse."}, status=HTTPStatus.NOT_FOUND)
