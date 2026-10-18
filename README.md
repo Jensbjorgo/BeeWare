@@ -43,6 +43,20 @@ XP blir værende når observasjonen utløper.
 - Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`, får cookiene `Secure`.
   Bak en proxy telles hver klient etter siste adresse i `X-Forwarded-For`.
 
+## Før offentlig drift
+
+Dette må på plass før appen legges ut på nett:
+
+- **Reverse proxy med HTTPS (nginx eller Caddy) foran serveren.** Python-serveren tåler ikke
+  klienter som sender data svært sakte («slowloris»). De kan holde alle 64 forbindelsene
+  opptatt. Proxyen tar imot hele forespørselen før den sendes videre. HTTPS trengs også for
+  GPS på mobil og for `Secure`-cookies.
+- **Database (SQLite) i stedet for JSON-filer.** Lagringen bruker én lås i én prosess, så
+  serveren kan ikke kjøre i flere prosesser. Like og XP skrives i to filer, så en diskfeil
+  mellom skrivingene kan gi en like uten XP.
+- **Egne kartfliser eller en flisleverandør.** `tile.openstreetmap.org` tillater ikke
+  produksjonstrafikk.
+
 ## Teknisk
 
 - Backend: standardbibliotek i Python (`http.server` + JSON API)
