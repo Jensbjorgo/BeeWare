@@ -13,7 +13,11 @@ async function setup(route = () => undefined) {
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, {
-      classList: { toggle() {} },
+      classList: {
+        toggle() {},
+        add() { this.hidden = true; },
+        remove() { this.hidden = false; },
+      },
       dataset: {},
       addEventListener(event, handler) { this[event] = handler; },
     });
@@ -23,7 +27,8 @@ async function setup(route = () => undefined) {
     point, options,
     addTo() { return this; },
     bindPopup() { return this; },
-    on() { return this; },
+    events: {},
+    on(event, handler) { this.events[event] = handler; return this; },
     clearLayers() {},
     setLatLng(value) { this.point = value; return this; },
     setRadius(value) { this.options.radius = value; return this; },
@@ -47,7 +52,7 @@ async function setup(route = () => undefined) {
     setInterval() { intervals++; },
   });
   const app = vm.runInContext(
-    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop }; })()`, context,
+    `(() => { ${source}\nreturn { state, updateSelection, loadNearbyStop, tiles }; })()`, context,
   );
   await settle();
   return {
@@ -75,6 +80,21 @@ test("GPS preserves manual selection; button moves selection to current position
   app.watch(60.1, 10.1);
   assert.equal(app.state.selectedLatLng.lat, 60);
   assert.equal(app.watches(), 1);
+});
+
+test("failed map tiles show an error and a successful retry clears it", async () => {
+  const app = await setup();
+  const status = app.element("#mapStatus");
+  assert.equal(app.tiles.point, "https://tile.openstreetmap.org/{z}/{x}/{y}.png");
+  app.tiles.events.loading();
+  app.tiles.events.tileerror();
+  app.tiles.events.load();
+  assert.match(status.textContent, /Kartbildene kunne ikke lastes/);
+  assert.equal(status.classList.hidden, false);
+  app.tiles.events.loading();
+  app.tiles.events.tileload();
+  app.tiles.events.load();
+  assert.equal(status.classList.hidden, true);
 });
 
 test("GPS creates and updates the accuracy circle in metres", async () => {
