@@ -5,14 +5,42 @@ const map = L.map("map", {
 });
 map.setView([59.9139, 10.7522], 12); // Oslo until GPS finds the user.
 
-// Kartverket's official topographic map of Norway; its cache serves zoom levels up to 18.
-const tiles = L.tileLayer("https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png", {
-  maxZoom: 18,
-  attribution:
-    '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
-    '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
-    '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
-}).addTo(map);
+const mapStatus = document.querySelector("#mapStatus");
+let loadedTiles = 0;
+let failedTiles = 0;
+
+const tiles = L.tileLayer(
+  "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png",
+  {
+    maxZoom: 18,
+    attribution:
+      '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
+      '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
+      '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
+  }
+);
+
+tiles.on("loading", () => {
+  loadedTiles = 0;
+  failedTiles = 0;
+  mapStatus.textContent = "Laster kart …";
+  mapStatus.classList.remove("hidden");
+});
+
+tiles.on("tileload", () => { loadedTiles++; });
+tiles.on("tileerror", () => { failedTiles++; });
+
+tiles.on("load", () => {
+  if (failedTiles > 0 && loadedTiles === 0) {
+    mapStatus.textContent =
+      "Kartbildene kunne ikke lastes fra Kartverket. Sjekk internettilgang og eventuell innholdsblokkering.";
+    mapStatus.classList.remove("hidden");
+  } else {
+    mapStatus.classList.add("hidden");
+  }
+});
+
+tiles.addTo(map);
 
 // Says so when none of the map images load, as when the network or a content blocker stops them.
 const mapStatus = document.querySelector("#mapStatus");

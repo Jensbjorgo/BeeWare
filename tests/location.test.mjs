@@ -15,7 +15,11 @@ async function setup(route = () => undefined) {
     if (!elements.has(selector)) elements.set(selector, {
       id: selector.slice(1),
       value: "",  // Like an empty input.
-      classList: { toggle() {} },
+      classList: {
+        toggle() {},
+        add() { this.hidden = true; },
+        remove() { this.hidden = false; },
+      },
       dataset: {},
       addEventListener(event, handler) { this[event] = handler; },
       setAttribute() {},
@@ -143,6 +147,49 @@ test("a poll waits for the previous one, so answers slower than the interval sti
   assert.ok(app.sightingMarkers.has("s1"));
   app.poll();
   assert.equal(answers.length, 1);  // The next poll starts once the previous one is done.
+});
+
+test("failed map tiles show an error and a successful retry clears it", async () => {
+  const app = await setup();
+  const status = app.element("#mapStatus");
+  assert.equal(app.tiles.point, "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png");
+  app.tiles.events.loading();
+  app.tiles.events.tileerror();
+  app.tiles.events.load();
+  assert.match(status.textContent, /Kartbildene kunne ikke lastes/);
+  assert.equal(status.classList.hidden, false);
+  app.tiles.events.loading();
+  app.tiles.events.tileload();
+  app.tiles.events.load();
+  assert.equal(status.classList.hidden, true);
+});
+
+test("a poll waits for the previous one, so answers slower than the interval still arrive", async () => {
+  const answers = [];
+  const app = await setup((url) => url === "/api/sightings" ? new Promise((resolve) => answers.push(resolve)) : undefined);
+  answers.shift()(reply({ items: [] }));  // Startup.
+  await settle();
+  app.poll();
+  app.poll();  // 20 s later, while the first poll still waits.
+  assert.equal(answers.length, 1);
+  answers.shift()(reply({ items: [{ id: "s1", lat: 58, lon: 8, created_at: new Date().toISOString(), likes_count: 0 }] }));
+  await settle();
+  assert.ok(app.sightingMarkers.has("s1"));
+  app.poll();
+  assert.equal(answers.length, 1);  // The next poll starts once the previous one is done.
+test("failed map tiles show an error and a successful retry clears it", async () => {
+  const app = await setup();
+  const status = app.element("#mapStatus");
+  assert.equal(app.tiles.point, "https://tile.openstreetmap.org/{z}/{x}/{y}.png");
+  app.tiles.events.loading();
+  app.tiles.events.tileerror();
+  app.tiles.events.load();
+  assert.match(status.textContent, /Kartbildene kunne ikke lastes/);
+  assert.equal(status.classList.hidden, false);
+  app.tiles.events.loading();
+  app.tiles.events.tileload();
+  app.tiles.events.load();
+  assert.equal(status.classList.hidden, true);
 });
 
 test("GPS creates and updates the accuracy circle in metres", async () => {
