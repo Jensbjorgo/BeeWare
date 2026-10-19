@@ -36,25 +36,12 @@ tiles.on("load", () => {
       "Kartbildene kunne ikke lastes fra Kartverket. Sjekk internettilgang og eventuell innholdsblokkering.";
     mapStatus.classList.remove("hidden");
   } else {
+    mapStatus.textContent = "";
     mapStatus.classList.add("hidden");
   }
 });
 
 tiles.addTo(map);
-
-// Says so when none of the map images load, as when the network or a content blocker stops them.
-const mapStatus = document.querySelector("#mapStatus");
-let tilesLoaded = 0;
-let tilesFailed = 0;
-tiles
-  .on("loading", () => { tilesLoaded = tilesFailed = 0; })
-  .on("tileload", () => { tilesLoaded++; })
-  .on("tileerror", () => { tilesFailed++; })
-  .on("load", () => {
-    mapStatus.textContent = tilesFailed && !tilesLoaded
-      ? "Kartbildene kunne ikke lastes fra Kartverket. Sjekk nettet og eventuell innholdsblokkering."
-      : "";
-  });
 
 const state = {
   selectedLatLng: null,
