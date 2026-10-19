@@ -62,10 +62,13 @@ STOP_ID_MAX = 64
 # client cannot push all active reports out of the 500-report store.
 SIGHTING_ACTIONS = {"like": "bekrefte", "report": "rapportere", "delete": "slette"}  # action -> verb in messages
 RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
-# Only the map tiles come from elsewhere (Kartverket); Leaflet is served from web/vendor.
+# Map data and label glyphs come from OpenFreeMap; Kartverket is the fallback for older devices.
+# Scripts, styles and the CSP-compatible map worker are all served locally.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self';"
-    " img-src 'self' data: https://cache.kartverket.no; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    " img-src 'self' data: blob: https://cache.kartverket.no;"
+    " connect-src 'self' https://tiles.openfreemap.org; worker-src 'self';"
+    " frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 
 
@@ -485,7 +488,13 @@ class Store:
                 "SELECT xp, likes_received, sightings_count FROM users WHERE key = ?", (username.casefold(),)
             ).fetchone()
         stats = dict(user) if user else {"xp": 0, "likes_received": 0, "sightings_count": 0}
-        return {**stats, "level": int(math.sqrt(stats["xp"] / XP_PER_LIKE)) + 1}
+        level = int(math.sqrt(stats["xp"] / XP_PER_LIKE)) + 1
+        return {
+            **stats,
+            "level": level,
+            "level_start_xp": (level - 1) ** 2 * XP_PER_LIKE,
+            "next_level_xp": level ** 2 * XP_PER_LIKE,
+        }
 
     def _new_session(self, db: sqlite3.Connection, username: str) -> str:
         token = secrets.token_urlsafe(24)

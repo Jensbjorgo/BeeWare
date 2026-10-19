@@ -2,46 +2,15 @@
 const map = L.map("map", {
   zoomControl: true,
   doubleClickZoom: false,
+  minZoom: 2,
+  maxZoom: 18,
+  maxBounds: [[-85, -Infinity], [85, Infinity]],
+  maxBoundsViscosity: 1,
 });
 map.setView([59.9139, 10.7522], 12); // Oslo until GPS finds the user.
 
 const mapStatus = document.querySelector("#mapStatus");
-let loadedTiles = 0;
-let failedTiles = 0;
-
-const tiles = L.tileLayer(
-  "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png",
-  {
-    maxZoom: 18,
-    attribution:
-      '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
-      '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
-      '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
-  }
-);
-
-tiles.on("loading", () => {
-  loadedTiles = 0;
-  failedTiles = 0;
-  mapStatus.textContent = "Laster kart …";
-  mapStatus.classList.remove("hidden");
-});
-
-tiles.on("tileload", () => { loadedTiles++; });
-tiles.on("tileerror", () => { failedTiles++; });
-
-tiles.on("load", () => {
-  if (failedTiles > 0 && loadedTiles === 0) {
-    mapStatus.textContent =
-      "Kartbildene kunne ikke lastes fra Kartverket. Sjekk internettilgang og eventuell innholdsblokkering.";
-    mapStatus.classList.remove("hidden");
-  } else {
-    mapStatus.textContent = "";
-    mapStatus.classList.add("hidden");
-  }
-});
-
-tiles.addTo(map);
+const tiles = createBasemap(map, mapStatus);
 
 const state = {
   selectedLatLng: null,
@@ -64,7 +33,6 @@ const routeInput = document.querySelector("#routeInput");
 const noteInput = document.querySelector("#noteInput");
 const formStatus = document.querySelector("#formStatus");
 const feedStatus = document.querySelector("#feedStatus");
-const nearestStop = document.querySelector("#nearestStop");
 const feed = document.querySelector("#feed");
 const stopOptions = document.querySelector("#stopOptions");
 const routeOptions = document.querySelector("#routeOptions");
@@ -76,7 +44,6 @@ const logoutBtn = document.querySelector("#logoutBtn");
 const authForms = document.querySelector("#authForms");
 const userPanel = document.querySelector("#userPanel");
 const currentUsername = document.querySelector("#currentUsername");
-const authState = document.querySelector("#authState");
 const authStatus = document.querySelector("#authStatus");
 const authToggle = document.querySelector("#authToggle");
 const authContent = document.querySelector("#authContent");
@@ -128,6 +95,9 @@ menuBackdrop.addEventListener("click", () => toggleMenu(false));
 const userLevel = document.querySelector("#userLevel");
 const userXp = document.querySelector("#userXp");
 const userConfirmations = document.querySelector("#userConfirmations");
+const xpProgressWrap = document.querySelector("#xpProgressWrap");
+const xpProgress = document.querySelector("#xpProgress");
+const xpProgressText = document.querySelector("#xpProgressText");
 
 // A suggestion list under a text field, used instead of <datalist>: browsers hide every datalist
 // option that does not contain the typed text, such as a stop found by its street or "31 Ruter".
@@ -381,11 +351,22 @@ function updateAuthUi() {
   const loggedIn = Boolean(state.user);
   authForms.classList.toggle("hidden", loggedIn);
   userPanel.classList.toggle("hidden", !loggedIn);
-  authState.textContent = loggedIn ? "Frivillig profil aktiv" : "Valgfritt";
   currentUsername.textContent = loggedIn ? state.user.username : "";
   userLevel.textContent = `Level ${state.stats?.level ?? 1}`;
   userXp.textContent = `${state.stats?.xp ?? 0} XP`;
   userConfirmations.textContent = confirmations(state.stats?.likes_received ?? 0);
+  const xp = state.stats?.xp ?? 0;
+  const start = state.stats?.level_start_xp;
+  const next = state.stats?.next_level_xp;
+  const hasProgress = loggedIn && Number.isFinite(start) && Number.isFinite(next) && next > start;
+  xpProgressWrap.hidden = !hasProgress;
+  if (hasProgress) {
+    const level = state.stats.level;
+    xpProgress.max = next - start;
+    xpProgress.value = Math.max(0, Math.min(xp - start, next - start));
+    xpProgressText.textContent = `${Math.max(0, next - xp)} XP til level ${level + 1}`;
+    xpProgress.setAttribute("aria-valuetext", `${xp - start} av ${next - start} XP til level ${level + 1}`);
+  }
 }
 
 // A position from GPS keeps following GPS; any other choice stays until the user changes it.
@@ -575,19 +556,16 @@ function clearStop() {
 }
 
 async function loadNearbyStop(lat, lon, replaceStop = true) {
+  const setNearbyStatus = lateStatus();
   if (replaceStop) {
     clearStop(); // A newer position also outdates pending stop searches.
   }
-  nearestStop.textContent = "Laster...";
   try {
     const payload = await fetchLatest("nearby", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
     if (!payload) {
       return;
     }
     const [closest] = payload.items;
-    nearestStop.textContent = closest
-      ? `${closest.name} (${formatDistance(closest.distance_m)})`
-      : "Fant ingen holdeplass innen 2 km.";
     // Fill in the stop unless the user has started typing one meanwhile.
     if (closest && !stopInput.value) {
       stopInput.value = closest.name;
@@ -595,7 +573,7 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
       stopInput.dataset.fromGps = String(state.selectionFollowsGps);
     }
   } catch (error) {
-    nearestStop.textContent = error.message;
+    setNearbyStatus(error.message, "error");
   }
 }
 
@@ -620,11 +598,10 @@ function stopChoices(stops) {
   }));
 }
 
-function selectStop({ stop, label }) {
+function selectStop({ stop }) {
   outdate("nearby"); // The position moves to this stop, so a pending nearby answer is outdated.
   updateSelection(stop.lat, stop.lon);
   map.panTo([stop.lat, stop.lon]);
-  nearestStop.textContent = `${label} (valgt)`;
   stopInput.dataset.stopId = stop.id;
   stopInput.dataset.fromGps = "false";
 }
@@ -742,6 +719,7 @@ let stopSearch = Promise.resolve();
 stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 
 async function searchStop() {
+  const setStopStatus = lateStatus();
   const query = stopInput.value.trim();
   userChoseManually();
   stopInput.dataset.stopId = "";
@@ -765,7 +743,7 @@ async function searchStop() {
     return choices.length && exact.length !== 1 ? "unpicked" : "ok";
   } catch (error) {
     stopSuggestions.show([]);
-    nearestStop.textContent = error.message;
+    setStopStatus(error.message, "error");
     return "failed"; // Publishing stops rather than send this name with a position it may not belong to.
   }
 }

@@ -161,6 +161,8 @@ form,
 .auth-form { display: grid; gap: var(--space-2); }
 
 label { display: grid; gap: var(--space-1); font-size: 13px; font-weight: 550; }
+.field-label { display: flex; align-items: center; gap: var(--space-1); }
+.field-label .icon { width: 16px; height: 16px; color: var(--line-strong); }
 
 input,
 textarea {
@@ -238,9 +240,6 @@ textarea:focus { background: var(--surface); border-color: var(--line-strong); }
 .location-button { padding: var(--space-1); min-height: 40px; font-size: 12px; white-space: nowrap; background: transparent; border-color: transparent; color: var(--muted); }
 .location-button .icon { width: 16px; height: 16px; }
 
-.selection { padding: var(--space-2); border: 2px solid var(--line); border-radius: 12px; background: var(--panel); }
-.meta-label { margin-bottom: var(--space-1); font-size: 12px; color: var(--muted); }
-.meta-value { font-size: 14px; font-weight: 500; }
 .tiny { color: var(--muted); font-size: 12px; line-height: 1.5; }
 
 .observations-heading { align-items: baseline; gap: var(--space-1); margin-bottom: var(--space-2); }
@@ -269,6 +268,7 @@ textarea:focus { background: var(--surface); border-color: var(--line-strong); }
 
 .map-wrap { position: relative; min-width: 0; min-height: 0; }
 #map { width: 100%; height: 100%; background: #e7eadd; }
+.leaflet-gl-layer { pointer-events: none; }
 
 .icon-button {
   width: 48px;
@@ -291,6 +291,22 @@ textarea:focus { background: var(--surface); border-color: var(--line-strong); }
 .user-panel { position: relative; display: grid; gap: var(--space-2); padding-right: var(--space-4); }
 .profile-name { font-size: 20px; font-weight: 600; letter-spacing: -0.5px; }
 .user-stats { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-2); color: var(--muted); font-size: 13px; }
+.xp-progress { display: grid; gap: var(--space-1); }
+.xp-progress progress {
+  display: block;
+  width: 100%;
+  height: 12px;
+  -webkit-appearance: none;
+  appearance: none;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  accent-color: var(--line-strong);
+}
+.xp-progress progress::-webkit-progress-bar { background: var(--surface-muted); }
+.xp-progress progress::-webkit-progress-value { background: var(--line-strong); border-radius: 999px; }
+.xp-progress progress::-moz-progress-bar { background: var(--line-strong); border-radius: 999px; }
 .profile-logout { position: absolute; top: 0; right: 0; width: 32px; min-height: 32px; padding: 0; background: transparent; }
 .profile-logout .icon { width: 18px; height: 18px; }
 
@@ -336,6 +352,9 @@ textarea:focus { background: var(--surface); border-color: var(--line-strong); }
   .like-button.is-selected:hover { background: #f5e8ae; }
   .ghost:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 3px 0 rgb(96 109 58 / 14%); }
   #menuClose:hover .icon { transform: rotate(90deg); }
+  .menu-toggle:hover .menu-icon { transform: rotate(180deg); }
+  .menu-toggle:hover .menu-icon path:first-child { transform: translateX(3px) scaleX(0.7); }
+  .menu-toggle:hover .menu-icon path:last-child { transform: translateX(-3px) scaleX(0.7); }
   .icon-button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgb(35 45 28 / 9%); }
   .feed-item:hover { transform: translateY(-2px); border-color: var(--line-strong); box-shadow: 0 6px 0 rgb(96 109 58 / 12%); }
   input:hover, textarea:hover { border-color: var(--line-strong); box-shadow: 0 0 0 3px rgb(96 109 58 / 9%); }
@@ -343,6 +362,10 @@ textarea:focus { background: var(--surface); border-color: var(--line-strong); }
 }
 
 .icon { transition: transform 300ms var(--ease); }
+.menu-icon path { transform-box: fill-box; transform-origin: center; transition: transform 380ms var(--ease); }
+.menu-toggle:focus-visible .menu-icon { transform: rotate(180deg); }
+.menu-toggle:focus-visible .menu-icon path:first-child { transform: translateX(3px) scaleX(0.7); }
+.menu-toggle:focus-visible .menu-icon path:last-child { transform: translateX(-3px) scaleX(0.7); }
 
 @media (max-width: 1199px) {
   .shell { display: block; }

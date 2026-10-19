@@ -309,7 +309,20 @@ assert request("POST", f"/api/sightings/{second}/like", headers=bob)[0] == 404
 third = request("POST", "/api/sightings", {"lat": 58, "lon": 8}, alice)[1]["id"]
 assert [row["id"] for row in sql("SELECT id FROM sightings")] == [third]  # ... and the next report deletes them; the XP stays.
 stats = request("GET", "/api/me", headers=alice)[1]["stats"]
-assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 3}, stats
+assert stats == {"xp": 10, "level": 2, "likes_received": 1, "sightings_count": 3,
+                 "level_start_xp": 10, "next_level_xp": 40}, stats
+""")
+
+    def test_xp_progress_bounds_at_level_changes(self):
+        run_in_copy(self, """
+server.store.create_user("tester", "secret1")
+for xp, level, start, next_level in (
+    (0, 1, 0, 10), (9, 1, 0, 10), (10, 2, 10, 40), (39, 2, 10, 40),
+    (40, 3, 40, 90), (89, 3, 40, 90), (90, 4, 90, 160), (125, 4, 90, 160),
+):
+    sql("UPDATE users SET xp = ? WHERE key = ?", xp, "tester")
+    stats = server.store.stats("tester")
+    assert (stats["level"], stats["level_start_xp"], stats["next_level_xp"]) == (level, start, next_level), stats
 """)
 
     def test_owners_delete_and_three_reports_hide_a_sighting(self):
@@ -362,13 +375,16 @@ assert abs(server.distance_km(58.059, 8, -58.059, -172) - 20003.931) < 0.001  # 
 
     def test_every_response_refuses_framing_and_sniffing(self):
         run_in_copy(self, """
-for path, status in (("/", 200), ("/app.js", 200), ("/api/config", 200), ("/missing.js", 404)):
+for path, status in (("/", 200), ("/app.js", 200), ("/basemap.js", 200), ("/map-style.json", 200),
+                     ("/vendor/maplibre-gl-csp-worker.js", 200), ("/api/config", 200), ("/missing.js", 404)):
     connection = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1])
     connection.request("GET", path)
     response = connection.getresponse()
     assert response.status == status, (path, response.status)
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"], path
     assert response.headers["X-Frame-Options"] == "DENY", path
+    assert "connect-src 'self' https://tiles.openfreemap.org" in response.headers["Content-Security-Policy"], path
+    assert "worker-src 'self'" in response.headers["Content-Security-Policy"], path
     assert response.headers["X-Content-Type-Options"] == "nosniff", path
     # Static files are checked for a newer version, so an update reaches every browser at once.
     assert response.headers["Cache-Control"] == ("no-store" if path.startswith("/api/") else "no-cache"), path

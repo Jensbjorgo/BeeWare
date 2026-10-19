@@ -3,20 +3,21 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+const source = await readFile(new URL("../web/basemap.js", import.meta.url), "utf8")
+  + "\n" + await readFile(new URL("../web/app.js", import.meta.url), "utf8");
 
 const reply = (payload, ok = true) => Promise.resolve({ ok, json: async () => payload });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // `route(url, options)` may return a response promise; anything else gets the default reply.
-async function setup(route = () => undefined) {
+async function setup(route = () => undefined, { vectorSupport = true, vectorFailure = false } = {}) {
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, {
       id: selector.slice(1),
       value: "",  // Like an empty input.
       classList: {
-        toggle() {},
+        toggle(name, value) { this[name] = value; },
         add() { this.hidden = true; },
         remove() { this.hidden = false; },
       },
@@ -30,6 +31,7 @@ async function setup(route = () => undefined) {
   const layer = (point, options) => ({
     point, options,
     addTo() { return this; },
+    getMaplibreMap() { return this; },
     bindPopup() { return this; },
     events: {},
     on(event, handler) { this.events[event] = handler; return this; },
@@ -50,15 +52,23 @@ async function setup(route = () => undefined) {
   const timeouts = new Map();
   let elapsed = 0;
   const context = vm.createContext({
+    maplibregl: { setWorkerUrl() {} },
     L: {
       map: () => ({
         on() {}, setView() {}, flyTo() {}, panTo() {}, invalidateSize() {},
         getCenter: () => ({ lat: 59.91, lng: 10.75 }), wrapLatLng: (point) => point,
       }),
+      maplibreGL: (options) => {
+        if (vectorFailure) throw new Error("WebGL initialization failed");
+        return layer(null, options);
+      },
       tileLayer: layer, layerGroup: layer, marker: layer, circle: layer,
       divIcon: (options) => options,
     },
-    document: { querySelector: element },
+    document: {
+      querySelector: element,
+      createElement: () => ({ getContext: () => vectorSupport ? { getExtension: () => null } : null }),
+    },
     navigator: { geolocation: {
       getCurrentPosition(callback, onError) { currentCallback = callback; currentError = onError; },
       watchPosition(callback, onError) { watchCallback = callback; watchError = onError; watches++; return 0; },
@@ -102,6 +112,28 @@ async function setup(route = () => undefined) {
     },
   };
 }
+
+test("profile XP progress uses server thresholds, resets at a new level, and hides after logout", async () => {
+  let user = { username: "alice" };
+  let stats = { xp: 65, level: 3, level_start_xp: 40, next_level_xp: 90 };
+  const app = await setup((url) => url === "/api/me" ? reply({ user, stats }) : undefined);
+  const progress = app.element("#xpProgress");
+  const wrapper = app.element("#xpProgressWrap");
+  assert.equal(wrapper.hidden, false);
+  assert.equal(progress.value, 25);
+  assert.equal(progress.max, 50);
+  assert.equal(app.element("#xpProgressText").textContent, "25 XP til level 4");
+  stats = { xp: 90, level: 4, level_start_xp: 90, next_level_xp: 160 };
+  await app.loadCurrentUser();
+  assert.equal(progress.value, 0);
+  assert.equal(progress.max, 70);
+  assert.equal(app.element("#userLevel").textContent, "Level 4");
+  assert.equal(app.element("#xpProgressText").textContent, "70 XP til level 5");
+  user = null;
+  stats = null;
+  await app.loadCurrentUser();
+  assert.equal(wrapper.hidden, true);
+});
 
 test("GPS preserves manual selection; button moves selection to current position", async () => {
   const app = await setup();
@@ -222,19 +254,37 @@ test("a poll waits for the previous one, so answers slower than the interval sti
   assert.equal(answers.length, 1);  // The next poll starts once the previous one is done.
 });
 
-test("failed map tiles show an error and a successful retry clears it", async () => {
+test("a vector map error stays visible until fresh content loads successfully", async () => {
   const app = await setup();
   const status = app.element("#mapStatus");
-  assert.equal(app.tiles.point, "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png");
-  app.tiles.events.loading();
-  app.tiles.events.tileerror();
-  app.tiles.events.load();
-  assert.match(status.textContent, /Kartbildene kunne ikke lastes/);
+  assert.equal(app.tiles.options.style, "/map-style.json");
+  app.tiles.events.error();
+  app.tiles.events.idle();
+  assert.match(status.textContent, /Kartet kunne ikke lastes/);
   assert.equal(status.classList.hidden, false);
-  app.tiles.events.loading();
-  app.tiles.events.tileload();
-  app.tiles.events.load();
+  app.tiles.events.sourcedata({ sourceDataType: "content", isSourceLoaded: true });
+  app.tiles.events.idle();
+  assert.equal(status.textContent, "");
   assert.equal(status.classList.hidden, true);
+});
+
+test("a renderer startup failure falls back without stopping GPS or reporting", async () => {
+  const app = await setup(undefined, { vectorFailure: true });
+  assert.match(app.tiles.point, /cache\.kartverket\.no/);
+  app.current(59.91, 10.75);
+  assert.ok(app.state.currentLocationMarker);
+  app.updateSelection(58, 8);
+  assert.equal(app.state.selectedLatLng.lat, 58);
+});
+
+test("the simplified color map labels only places and omits buildings, shops and terrain detail", async () => {
+  const style = JSON.parse(await readFile(new URL("../web/map-style.json", import.meta.url), "utf8"));
+  const labels = style.layers.filter((layer) => layer.type === "symbol");
+  assert.ok(labels.length > 0);
+  assert.ok(labels.every((layer) => layer["source-layer"] === "place"));
+  assert.ok(style.layers.every((layer) => !["building", "poi", "transportation_name", "contour"].includes(layer["source-layer"])));
+  assert.ok(style.layers.some((layer) => layer["source-layer"] === "water" && layer.type === "fill"));
+  assert.ok(style.layers.some((layer) => layer["source-layer"] === "park" && layer.type === "fill"));
 });
 
 test("GPS creates and updates the accuracy circle in metres", async () => {
@@ -366,7 +416,7 @@ test("a published report stays reported as published when the refresh fails", as
   assert.equal(app.element("#feedStatus").textContent, "Serveren svarer ikke.");
 });
 
-test("typing a stop while the nearest stop loads keeps the text and still shows the nearest stop", async () => {
+test("typing a stop while the nearest stop loads keeps the text", async () => {
   const pending = [];
   const app = await setup((url) => url.startsWith("/api/stops/nearby")
     ? new Promise((resolve) => pending.push(resolve)) : undefined);
@@ -376,7 +426,6 @@ test("typing a stop while the nearest stop loads keeps the text and still shows 
   await stop.input();
   pending[0](reply({ items: [{ id: "A", name: "Alfa", distance_m: 40 }] }));
   await nearby;
-  assert.equal(app.element("#nearestStop").textContent, "Alfa (40 m)");
   assert.equal(stop.value, "Mitt sted");
   assert.equal(stop.dataset.stopId, "");
 });
@@ -868,8 +917,11 @@ test("the line search sends the report position, so nearby lines come first", as
   assert.ok(urls.includes("/api/routes?q=3&lat=63.4168&lon=10.4076"));
 });
 
-test("failed map tiles show a message and a later successful load clears it", async () => {
-  const app = await setup();
+test("devices without WebGL keep a raster map, with error recovery and working GPS", async () => {
+  const app = await setup(undefined, { vectorSupport: false });
+  assert.match(app.tiles.point, /cache\.kartverket\.no/);
+  app.current(59.91, 10.75);
+  assert.ok(app.state.currentLocationMarker);
   const status = app.element("#mapStatus");
   app.tiles.events.loading();
   app.tiles.events.tileerror();
