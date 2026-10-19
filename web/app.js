@@ -64,13 +64,11 @@ const routeInput = document.querySelector("#routeInput");
 const noteInput = document.querySelector("#noteInput");
 const formStatus = document.querySelector("#formStatus");
 const feedStatus = document.querySelector("#feedStatus");
-const selectedLocation = document.querySelector("#selectedLocation");
 const nearestStop = document.querySelector("#nearestStop");
 const feed = document.querySelector("#feed");
 const stopOptions = document.querySelector("#stopOptions");
 const routeOptions = document.querySelector("#routeOptions");
 const locateBtn = document.querySelector("#locateBtn");
-const centerBtn = document.querySelector("#centerBtn");
 const ttlLabel = document.querySelector("#ttlLabel");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
@@ -82,8 +80,54 @@ const authState = document.querySelector("#authState");
 const authStatus = document.querySelector("#authStatus");
 const authToggle = document.querySelector("#authToggle");
 const authContent = document.querySelector("#authContent");
+const menuToggle = document.querySelector("#menuToggle");
+const sidePanel = document.querySelector("#sidePanel");
+const menuBackdrop = document.querySelector("#menuBackdrop");
+const mobilePublish = document.querySelector("#mobilePublish");
+const mobileFormStatus = document.querySelector("#mobileFormStatus");
+const shell = document.querySelector(".shell");
+const wideLayout = typeof matchMedia === "function" ? matchMedia("(min-width: 1200px)") : null;
+let menuOpen = false;
+
+function toggleMenu(open = !menuOpen) {
+  menuOpen = open;
+  shell.classList.toggle("menu-closed", !open);
+  sidePanel.classList.toggle("is-open", open);
+  menuBackdrop.hidden = !open;
+  menuToggle.hidden = open;
+  menuToggle.setAttribute("aria-expanded", String(open));
+  menuToggle.setAttribute("aria-label", open ? "Lukk meny" : "Åpne meny");
+  if (open) toggleAuth(false);
+  map.invalidateSize();
+}
+
+// On wide screens the sidebar starts open; narrower screens start with the map.
+toggleMenu(Boolean(wideLayout?.matches));
+wideLayout?.addEventListener("change", (event) => toggleMenu(event.matches));
+
+menuToggle.addEventListener("click", () => {
+  toggleMenu(true);
+  document.querySelector("#menuClose").focus();
+});
+document.querySelector("#menuClose").addEventListener("click", () => {
+  toggleMenu(false);
+  menuToggle.focus();
+});
+menuBackdrop.addEventListener("click", () => toggleMenu(false));
+// Keyboard dismissal also works when focus is inside either panel.
+[sidePanel, authContent].forEach((panel) => panel.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (menuOpen) {
+    toggleMenu(false);
+    menuToggle.focus();
+  } else if (state.authOpen) {
+    toggleAuth(false);
+    authToggle.focus();
+  }
+}));
 const userLevel = document.querySelector("#userLevel");
 const userXp = document.querySelector("#userXp");
+const userConfirmations = document.querySelector("#userConfirmations");
 
 // A suggestion list under a text field, used instead of <datalist>: browsers hide every datalist
 // option that does not contain the typed text, such as a stop found by its street or "31 Ruter".
@@ -267,18 +311,30 @@ function escapeHtml(value) {
 }
 
 let statusVersion = 0;
+let statusSource = "";
+let statusTimer;
 
-function setStatus(message, type = "") {
+function setStatus(message, type = "", source = "") {
+  clearTimeout(statusTimer);
   statusVersion++;
+  statusSource = source;
   formStatus.textContent = message;
   formStatus.className = type ? `status ${type}` : "status";
+  mobileFormStatus.textContent = message;
+  mobileFormStatus.className = formStatus.className;
+  if (message) {
+    const version = statusVersion;
+    statusTimer = setTimeout(() => {
+      if (statusVersion === version) setStatus("");
+    }, 3000);
+  }
 }
 
 // For answers that can arrive late, such as GPS or suggestions: the returned function shows a
 // message only if no newer one, such as a published report, was shown in the meantime.
-function lateStatus() {
+function lateStatus(source = "") {
   const before = statusVersion;
-  return (message, type) => statusVersion === before && setStatus(message, type);
+  return (message, type) => statusVersion === before && setStatus(message, type, source);
 }
 
 function setAuthStatus(message, type = "") {
@@ -289,7 +345,7 @@ function setAuthStatus(message, type = "") {
 function makeIcon(className) {
   return L.divIcon({
     className: "",
-    html: `<div class="${className}"></div>`,
+    html: `<div class="${className}">${className.startsWith("bee-dot") ? '<svg viewBox="0 0 40 40" aria-hidden="true"><use href="#bee-mark" /></svg>' : ""}</div>`,
     iconSize: [24, 24],
     iconAnchor: [12, 12],
   });
@@ -307,9 +363,12 @@ function markerAgeClass(isoString) {
 }
 
 function toggleAuth(open = !state.authOpen) {
+  if (open && menuOpen && !wideLayout?.matches) toggleMenu(false);
   state.authOpen = open;
+  authContent.hidden = !open;
   authContent.classList.toggle("hidden", !open);
   authToggle.setAttribute("aria-expanded", String(open));
+  authToggle.setAttribute("aria-label", open ? "Lukk profil" : "Åpne profil");
 }
 
 function setUser(user, stats = null) {
@@ -324,8 +383,9 @@ function updateAuthUi() {
   userPanel.classList.toggle("hidden", !loggedIn);
   authState.textContent = loggedIn ? "Frivillig profil aktiv" : "Valgfritt";
   currentUsername.textContent = loggedIn ? state.user.username : "";
-  userLevel.textContent = `Nivå ${state.stats?.level ?? 1}`;
-  userXp.textContent = `${state.stats?.xp ?? 0} XP · ${confirmations(state.stats?.likes_received ?? 0)}`;
+  userLevel.textContent = `Level ${state.stats?.level ?? 1}`;
+  userXp.textContent = `${state.stats?.xp ?? 0} XP`;
+  userConfirmations.textContent = confirmations(state.stats?.likes_received ?? 0);
 }
 
 // A position from GPS keeps following GPS; any other choice stays until the user changes it.
@@ -340,7 +400,6 @@ function updateSelection(lat, lon, fromGps = false) {
     routeSuggestions.show([]);
     searchRoute();
   }
-  selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
     state.selectionMarker = L.marker([lat, lon], {
       draggable: true,
@@ -406,14 +465,13 @@ function renderFeed(items) {
           ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
           <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
           <div class="feed-actions">
-            <span class="tiny">${item.distance_to_stop_m != null ? `${formatDistance(item.distance_to_stop_m)} fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
             <div class="feed-buttons">
-              <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
-                ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
+              <button class="ghost like-button${item.liked_by_me ? " is-selected" : ""}" type="button" aria-pressed="${Boolean(item.liked_by_me)}" data-like-id="${escapeHtml(item.id)}">
+                <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>${item.liked_by_me ? "Bekreftet" : "Bekreft"}<span class="action-count">${item.likes_count}</span>
               </button>
               ${item.mine
-                ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}">Slett</button>`
-                : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}">Rapporter</button>`}
+                ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-trash" /></svg>Slett</button>`
+                : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-flag" /></svg>Rapporter</button>`}
             </div>
           </div>
         </article>
@@ -463,7 +521,7 @@ function renderSightings(items) {
 
 async function loadConfig() {
   const payload = await fetchJson("/api/config");
-  ttlLabel.textContent = `Observasjoner vises i ${payload.ttl_hours} timer.`;
+  ttlLabel.textContent = `Siste ${payload.ttl_hours} timer`;
 }
 
 async function loadCurrentUser() {
@@ -604,6 +662,8 @@ function lookUpStopForGps(lat, lon, fromButton) {
 function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
   const { latitude, longitude, accuracy } = position.coords;
   updateCurrentLocation(latitude, longitude, accuracy);
+  // A recovered fix clears only a GPS warning, preserving publishing and other form messages.
+  if (statusSource === "gps") setStatus("");
   if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
     updateSelection(latitude, longitude, true);
     if (selectLocation) {
@@ -619,13 +679,13 @@ function handleLocationUpdate(position, shouldCenter = false, selectLocation = f
 
 function startLocationTracking(selectLocation = false) {
   if (!navigator.geolocation) {
-    setStatus("Geolokasjon er ikke tilgjengelig i denne nettleseren.", "error");
+    setStatus("Geolokasjon er ikke tilgjengelig i denne nettleseren.", "error", "gps");
     return;
   }
 
   locateBtn.disabled = true;
   const changesBefore = state.manualChanges;
-  const setGpsStatus = lateStatus();
+  const setGpsStatus = lateStatus("gps");
   let release = () => {};
   if (selectLocation) {
     gpsWait = new Promise((resolve) => (release = resolve));
@@ -634,14 +694,21 @@ function startLocationTracking(selectLocation = false) {
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
-      setGpsStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
       // A spot picked or a stop typed by hand while GPS was answering wins over the button press.
       handleLocationUpdate(position, true, selectLocation && state.manualChanges === changesBefore);
       release();
     },
-    () => {
+    (error) => {
       locateBtn.disabled = false;
-      setGpsStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      // The watch may already have succeeded while this separate request timed out.
+      if (selectLocation || !state.currentLocationMarker) {
+        setGpsStatus(
+          error.code === 1
+            ? "Tillat lokasjon i nettleseren for å vise markøren din."
+            : "Fant ikke oppdatert posisjon. Prøv igjen eller velg et sted i kartet.",
+          "error"
+        );
+      }
       if (selectLocation && state.manualChanges === changesBefore) {
         gpsButtonFailures++; // A report waiting for this position is not sent from the old one.
       }
@@ -762,8 +829,6 @@ feed.addEventListener("click", async (event) => {
 
 map.on("click", (event) => selectPoint(event.latlng));
 
-centerBtn.addEventListener("click", () => selectPoint(map.getCenter()));
-
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);
 });
@@ -771,7 +836,7 @@ locateBtn.addEventListener("click", () => {
 reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitButton = reportForm.querySelector("button[type='submit']");
-  submitButton.disabled = true;
+  submitButton.disabled = mobilePublish.disabled = true;
   // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
   const failuresBefore = gpsButtonFailures;
   let waits;
@@ -786,17 +851,17 @@ reportForm.addEventListener("submit", async (event) => {
       ? "Velg holdeplassen i forslagslisten, eller velg et sted i kartet."
       : "";
   if (searchProblem) {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
     setStatus(searchProblem, "error");
     return;
   }
   if (gpsButtonFailures !== failuresBefore) {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
     setStatus("Fant ikke posisjonen din. Velg et sted i kartet eller trykk «Bruk min posisjon» igjen.", "error");
     return;
   }
   if (!state.selectedLatLng) {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
     return;
   }
@@ -819,7 +884,7 @@ reportForm.addEventListener("submit", async (event) => {
     setStatus(error.message, "error");
     return;
   } finally {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
   }
   if (noteInput.value.trim() === note) {
     noteInput.value = ""; // Keep a new note typed while this one was sent.

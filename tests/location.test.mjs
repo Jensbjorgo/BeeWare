@@ -47,11 +47,12 @@ async function setup(route = () => undefined) {
   let watches = 0;
   let intervals = 0;
   let poll;
-  const timeouts = new Set();
+  const timeouts = new Map();
+  let elapsed = 0;
   const context = vm.createContext({
     L: {
       map: () => ({
-        on() {}, setView() {}, flyTo() {}, panTo() {},
+        on() {}, setView() {}, flyTo() {}, panTo() {}, invalidateSize() {},
         getCenter: () => ({ lat: 59.91, lng: 10.75 }), wrapLatLng: (point) => point,
       }),
       tileLayer: layer, layerGroup: layer, marker: layer, circle: layer,
@@ -70,7 +71,7 @@ async function setup(route = () => undefined) {
     ]),
     AbortController,
     setInterval(callback) { intervals++; poll = callback; },
-    setTimeout(callback) { timeouts.add(callback); return callback; },
+    setTimeout(callback, delay) { timeouts.set(callback, elapsed + delay); return callback; },
     confirm: () => true,
     clearTimeout(callback) { timeouts.delete(callback); },
   });
@@ -83,13 +84,22 @@ async function setup(route = () => undefined) {
     element,
     click: () => element("#locateBtn").click(),
     current: (lat, lon, accuracy = 25) => currentCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
-    currentFails: () => currentError({ code: 3 }),
+    currentFails: (code = 3) => currentError({ code }),
     watch: (lat, lon, accuracy = 25) => watchCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watches: () => watches,
     watchDenied: () => watchError({ code: 1, PERMISSION_DENIED: 1 }),
     intervals: () => intervals,
     poll: () => poll(),
-    timeOut: () => timeouts.forEach((callback) => callback()),
+    timeOut: () => [...timeouts.keys()].forEach((callback) => { timeouts.delete(callback); callback(); }),
+    advanceTime: (milliseconds) => {
+      elapsed += milliseconds;
+      for (const [callback, deadline] of [...timeouts]) {
+        if (deadline <= elapsed) {
+          timeouts.delete(callback);
+          callback();
+        }
+      }
+    },
   };
 }
 
@@ -114,6 +124,69 @@ test("GPS preserves manual selection; button moves selection to current position
   app.watch(60.1, 10.1);
   assert.equal(app.state.selectedLatLng.lat, 60.1);  // A position from GPS keeps following GPS.
   assert.equal(app.watches(), 1);
+});
+
+test("a GPS fix clears an earlier location warning from both layouts", async () => {
+  const app = await setup();
+  app.currentFails(1);
+  assert.match(app.element("#formStatus").textContent, /Tillat lokasjon/);
+  app.watch(59.91, 10.75);
+  assert.equal(app.element("#formStatus").textContent, "");
+  assert.equal(app.element("#mobileFormStatus").textContent, "");
+});
+
+test("a timed-out initial GPS request does not warn when the watch already found a position", async () => {
+  const app = await setup();
+  app.watch(59.91, 10.75);
+  app.currentFails();
+  assert.ok(app.state.currentLocationMarker);
+  assert.ok(!app.element("#formStatus").textContent);
+  assert.ok(!app.element("#mobileFormStatus").textContent);
+});
+
+test("GPS recovery preserves a newer form error and timeouts do not claim permission was denied", async () => {
+  const app = await setup();
+  app.currentFails();
+  const status = app.element("#formStatus");
+  assert.match(status.textContent, /Fant ikke oppdatert posisjon/);
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.match(status.textContent, /Velg først en posisjon/);
+  const message = status.textContent;
+  app.watch(59.91, 10.75);
+  assert.equal(status.textContent, message);
+  assert.equal(app.element("#mobileFormStatus").textContent, message);
+});
+
+test("form messages disappear after three seconds in both layouts", async () => {
+  const app = await setup();
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  const status = app.element("#formStatus");
+  const mobileStatus = app.element("#mobileFormStatus");
+  assert.match(status.textContent, /Velg først en posisjon/);
+  assert.equal(mobileStatus.textContent, status.textContent);
+  app.advanceTime(2999);
+  assert.ok(status.textContent);
+  app.advanceTime(1);
+  assert.equal(status.textContent, "");
+  assert.equal(mobileStatus.textContent, "");
+});
+
+test("triggering a message again restarts its three seconds and can show it after expiry", async () => {
+  const app = await setup();
+  const submit = () => app.element("#reportForm").submit({ preventDefault() {} });
+  const status = app.element("#formStatus");
+  await submit();
+  app.advanceTime(2000);
+  await submit();
+  app.advanceTime(1000);
+  assert.match(status.textContent, /Velg først en posisjon/);
+  app.advanceTime(1999);
+  assert.ok(status.textContent);
+  app.advanceTime(1);
+  assert.equal(status.textContent, "");
+  await submit();
+  assert.match(status.textContent, /Velg først en posisjon/);
+  assert.equal(app.element("#mobileFormStatus").textContent, status.textContent);
 });
 
 test("an automatic GPS position and its stop follow newer fixes until the user types a stop", async () => {

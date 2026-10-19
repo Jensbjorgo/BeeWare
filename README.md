@@ -1,11 +1,20 @@
 # BeeWare
 
-Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
+**BeeWare – få oversikt over det som skjer rundt deg.**
+
+BeeWare lar brukere markere ubehagelige, truende eller potensielt farlige hendelser på et kart
+for å advare andre i nærheten. Det kan være trakassering, truende oppførsel, slåssing eller
+åpenlys bruk og salg av narkotika.
+
+Ved å registrere sted og en kort beskrivelse kan brukerne dele det de har observert.
+Tidspunktet lagres automatisk når observasjonen publiseres. Målet er å gi andre bedre oversikt
+over omgivelsene, slik at de kan ta egne valg om hvor de ferdes.
 
 ## Hva appen gjør
 
 - Viser et kart med nylige observasjoner.
 - Lar brukeren trykke i kartet eller bruke egen posisjon for å registrere en observasjon.
+- Lar brukeren beskrive hendelsen kort og eventuelt knytte den til en holdeplass eller linje.
 - Viser egen posisjon som egen blå markør i kartet.
 - Dekker fastlands-Norge med Kartverkets topografiske kart og Enturs nasjonale holdeplass- og linjedata.
 - Henter nærmeste holdeplass innen 2 km, målt til nærmeste plattform.
@@ -114,8 +123,8 @@ Dette må på plass før appen legges ut på nett:
 Trykk «Bruk min posisjon» og gi nettleseren tilgang til posisjonen din.
 Den blå markøren viser hvor du er, og sirkelen viser anslått nøyaktighet.
 Rapportposisjonen og holdeplassen GPS fyller inn følger nye GPS-målinger, og knappen flytter
-rapportposisjonen tilbake til deg. Et klikk i kartet, flytting av rapportmarkøren, «Bruk kartets
-midtpunkt» eller et valgt holdeplassforslag lar deg velge et annet sted uten at GPS overskriver
+rapportposisjonen tilbake til deg. Et klikk i kartet, flytting av rapportmarkøren
+eller et valgt holdeplassforslag lar deg velge et annet sted uten at GPS overskriver
 valget, og GPS rører heller ikke en holdeplass du skriver inn selv. For en holdeplass GPS fylte
 inn, velger serveren nærmeste holdeplass til posisjonen som publiseres, så de alltid hører sammen. Med tastatur flyttes kartet med piltastene.
 
