@@ -142,8 +142,35 @@ textarea {
 
 input:focus,
 textarea:focus {
-  outline: 2px solid rgba(247, 198, 0, 0.35);
-  border-color: var(--accent);
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 1px;
+}
+
+.suggestions {
+  margin: -6px 0 0;
+  padding: 4px;
+  max-height: 16rem;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid rgba(17, 63, 138, 0.16);
+  border-radius: 14px;
+  background: #fffdf9;
+}
+
+.suggestions[hidden] {
+  display: none;
+}
+
+.suggestions li {
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.suggestions li:hover,
+.suggestions li[aria-selected="true"] {
+  background: var(--accent-soft);
+  outline: 2px solid var(--accent-deep);
 }
 
 button {
@@ -189,6 +216,12 @@ button:disabled {
   background: linear-gradient(135deg, rgba(247, 198, 0, 0.18), rgba(17, 63, 138, 0.08));
 }
 
+.ghost.small {
+  margin-top: 8px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
 .meta-label {
   margin: 0 0 6px;
   font-size: 0.82rem;
@@ -200,6 +233,8 @@ button:disabled {
 }
 
 .feed-item {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: grid;
   gap: 10px;
   padding: 14px;
@@ -231,6 +266,12 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.feed-buttons {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
 }
 
 .like-button {
@@ -269,6 +310,10 @@ button:disabled {
   border-radius: 12px;
   background: var(--panel-strong);
   box-shadow: var(--shadow);
+}
+
+.map-status:empty {
+  display: none;
 }
 
 .auth-popover {
@@ -330,6 +375,7 @@ button:disabled {
 
 .leaflet-popup-content {
   font-family: var(--font-body);
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 900px) {

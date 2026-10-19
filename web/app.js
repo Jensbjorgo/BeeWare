@@ -3,32 +3,58 @@ const map = L.map("map", {
   zoomControl: true,
   doubleClickZoom: false,
 });
-map.setView([58.1467, 7.9956], 11);
+map.setView([59.9139, 10.7522], 12); // Oslo until GPS finds the user.
 
 const mapStatus = document.querySelector("#mapStatus");
 let loadedTiles = 0;
 let failedTiles = 0;
-const tiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap-bidragsytere",
-});
+
+const tiles = L.tileLayer(
+  "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png",
+  {
+    maxZoom: 18,
+    attribution:
+      '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
+      '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
+      '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
+  }
+);
+
 tiles.on("loading", () => {
   loadedTiles = 0;
   failedTiles = 0;
   mapStatus.textContent = "Laster kart …";
   mapStatus.classList.remove("hidden");
 });
+
 tiles.on("tileload", () => { loadedTiles++; });
 tiles.on("tileerror", () => { failedTiles++; });
+
 tiles.on("load", () => {
   if (failedTiles > 0 && loadedTiles === 0) {
-    mapStatus.textContent = "Kartbildene kunne ikke lastes fra OpenStreetMap. Sjekk internettilgang og eventuell innholdsblokkering.";
+    mapStatus.textContent =
+      "Kartbildene kunne ikke lastes fra Kartverket. Sjekk internettilgang og eventuell innholdsblokkering.";
     mapStatus.classList.remove("hidden");
   } else {
     mapStatus.classList.add("hidden");
   }
 });
+
 tiles.addTo(map);
+
+// Says so when none of the map images load, as when the network or a content blocker stops them.
+const mapStatus = document.querySelector("#mapStatus");
+let tilesLoaded = 0;
+let tilesFailed = 0;
+tiles
+  .on("loading", () => { tilesLoaded = tilesFailed = 0; })
+  .on("tileload", () => { tilesLoaded++; })
+  .on("tileerror", () => { tilesFailed++; })
+  .on("load", () => {
+    mapStatus.textContent = tilesFailed && !tilesLoaded
+      ? "Kartbildene kunne ikke lastes fra Kartverket. Sjekk nettet og eventuell innholdsblokkering."
+      : "";
+  });
 
 const state = {
   selectedLatLng: null,
@@ -41,6 +67,8 @@ const state = {
   authOpen: false,
   hasAutoCentered: false,
   watchId: null,
+  selectionFollowsGps: false,
+  manualChanges: 0, // Spots and stops the user picks or types; a pending button press yields to them.
 };
 
 const reportForm = document.querySelector("#reportForm");
@@ -48,12 +76,14 @@ const stopInput = document.querySelector("#stopInput");
 const routeInput = document.querySelector("#routeInput");
 const noteInput = document.querySelector("#noteInput");
 const formStatus = document.querySelector("#formStatus");
+const feedStatus = document.querySelector("#feedStatus");
 const selectedLocation = document.querySelector("#selectedLocation");
 const nearestStop = document.querySelector("#nearestStop");
 const feed = document.querySelector("#feed");
 const stopOptions = document.querySelector("#stopOptions");
 const routeOptions = document.querySelector("#routeOptions");
 const locateBtn = document.querySelector("#locateBtn");
+const centerBtn = document.querySelector("#centerBtn");
 const ttlLabel = document.querySelector("#ttlLabel");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
@@ -68,16 +98,156 @@ const authContent = document.querySelector("#authContent");
 const userLevel = document.querySelector("#userLevel");
 const userXp = document.querySelector("#userXp");
 
-async function fetchJson(url, options) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || "Klarte ikke å hente data.");
+// A suggestion list under a text field, used instead of <datalist>: browsers hide every datalist
+// option that does not contain the typed text, such as a stop found by its street or "31 Ruter".
+// `choose` gets the picked item.
+function suggestionList(input, list, choose) {
+  let items = [];
+  let active = -1;
+  let open = false; // Typing and the Down arrow open the list; Escape, leaving the field and a pick close it.
+  function render(index = -1) {
+    active = index;
+    const shown = open && items.length > 0;
+    list.hidden = !shown;
+    input.setAttribute("aria-expanded", String(shown));
+    input.setAttribute("aria-activedescendant", shown && active >= 0 ? `${list.id}-${active}` : "");
+    list.innerHTML = shown
+      ? items
+        .map((item, i) => `<li id="${list.id}-${i}" role="option" data-index="${i}" aria-selected="${i === active}">` +
+          `${escapeHtml(item.label)}</li>`)
+        .join("")
+      : "";
+    list.querySelector(`[aria-selected="true"]`)?.scrollIntoView?.({ block: "nearest" });
   }
-  return response.json();
+  function pick(index) {
+    const item = items[index];
+    items = [];
+    open = false;
+    render();
+    choose(item);
+  }
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      open = false; // Also while a search is loading, so its answer does not open the list.
+      render();
+      return;
+    }
+    if (!items.length) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const next = open ? (active + 1) % items.length : 0;
+      open = true;
+      render(next);
+    } else if (event.key === "ArrowUp" && open) {
+      event.preventDefault();
+      render(active > 0 ? active - 1 : items.length - 1);
+    } else if (event.key === "Enter" && open && active >= 0) {
+      event.preventDefault(); // Picks the option instead of publishing the report.
+      pick(active);
+    }
+  });
+  // Keeps focus in the field while an option is clicked, so the blur below does not close the list first.
+  list.addEventListener("mousedown", (event) => event.preventDefault());
+  list.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-index]");
+    if (option) {
+      pick(Number(option.dataset.index));
+    }
+  });
+  input.addEventListener("blur", () => {
+    open = false;
+    render();
+  });
+  return {
+    // What was just typed makes the old suggestions wrong, before the new ones arrive.
+    typed() {
+      items = [];
+      open = true;
+      render();
+    },
+    // A late answer fills a list the user has closed without opening it again.
+    show(newItems) {
+      items = newItems;
+      render();
+    },
+    close() {
+      items = [];
+      open = false;
+      render();
+    },
+  };
+}
+
+const stopSuggestions = suggestionList(stopInput, stopOptions, (choice) => {
+  outdate("stop");
+  stopInput.value = choice.label;
+  selectStop(choice);
+});
+let routePicked = false; // A picked line stays; typed text is searched again when the report moves.
+const routeSuggestions = suggestionList(routeInput, routeOptions, (route) => {
+  outdate("route");
+  routeInput.value = route.value;
+  routePicked = true;
+});
+
+const REQUEST_TIMEOUT_MS = 15000;
+
+// A request that gets no answer, such as on a dead mobile connection, fails after REQUEST_TIMEOUT_MS.
+async function fetchJson(url, { signal, ...options } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  signal?.addEventListener("abort", () => controller.abort());
+  try {
+    const response = await fetch(url, { credentials: "same-origin", ...options, signal: controller.signal });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || "Klarte ikke å hente data.");
+    }
+    return await response.json();
+  } catch (error) {
+    // A timeout aborts, and fetch rejects with a TypeError when the network fails.
+    if (!signal?.aborted && (error.name === "AbortError" || error instanceof TypeError)) {
+      throw new Error("Fikk ikke svar fra serveren. Sjekk nettet og prøv igjen.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function postJson(url, body) {
+  return fetchJson(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// Only the newest request of each kind may update the page; older answers are dropped.
+const latest = { me: 0, sightings: 0, nearby: 0, stop: 0, route: 0 };
+const controllers = {};
+
+// Outdates the running request of this kind and aborts it, so nothing waits for its answer.
+function outdate(kind) {
+  latest[kind]++;
+  controllers[kind]?.abort();
+}
+
+async function fetchLatest(kind, url) {
+  outdate(kind);
+  const request = latest[kind];
+  const controller = (controllers[kind] = new AbortController());
+  try {
+    const payload = await fetchJson(url, { signal: controller.signal });
+    return request === latest[kind] ? payload : null;
+  } catch (error) {
+    if (request === latest[kind]) {
+      throw error;
+    }
+    return null;
+  }
 }
 
 function formatAge(isoString) {
@@ -93,6 +263,14 @@ function formatAge(isoString) {
   return minutes ? `${hours} t ${minutes} min siden` : `${hours} t siden`;
 }
 
+function confirmations(count) {
+  return `${count} ${count === 1 ? "bekreftelse" : "bekreftelser"}`;
+}
+
+function formatDistance(metres) {
+  return metres < 1000 ? `${metres} m` : `${(metres / 1000).toFixed(1).replace(".", ",")} km`;
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -101,9 +279,19 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+let statusVersion = 0;
+
 function setStatus(message, type = "") {
+  statusVersion++;
   formStatus.textContent = message;
   formStatus.className = type ? `status ${type}` : "status";
+}
+
+// For answers that can arrive late, such as GPS or suggestions: the returned function shows a
+// message only if no newer one, such as a published report, was shown in the meantime.
+function lateStatus() {
+  const before = statusVersion;
+  return (message, type) => statusVersion === before && setStatus(message, type);
 }
 
 function setAuthStatus(message, type = "") {
@@ -134,6 +322,13 @@ function markerAgeClass(isoString) {
 function toggleAuth(open = !state.authOpen) {
   state.authOpen = open;
   authContent.classList.toggle("hidden", !open);
+  authToggle.setAttribute("aria-expanded", String(open));
+}
+
+function setUser(user, stats = null) {
+  state.user = user;
+  state.stats = stats;
+  updateAuthUi();
 }
 
 function updateAuthUi() {
@@ -142,32 +337,47 @@ function updateAuthUi() {
   userPanel.classList.toggle("hidden", !loggedIn);
   authState.textContent = loggedIn ? "Frivillig profil aktiv" : "Valgfritt";
   currentUsername.textContent = loggedIn ? state.user.username : "";
-  userLevel.textContent = `Level ${state.stats?.level ?? 1}`;
-  userXp.textContent = `${state.stats?.xp ?? 0} XP · ${state.stats?.likes_received ?? 0} likes`;
+  userLevel.textContent = `Nivå ${state.stats?.level ?? 1}`;
+  userXp.textContent = `${state.stats?.xp ?? 0} XP · ${confirmations(state.stats?.likes_received ?? 0)}`;
 }
 
-function updateSelection(lat, lon) {
+// A position from GPS keeps following GPS; any other choice stays until the user changes it.
+function updateSelection(lat, lon, fromGps = false) {
   state.selectedLatLng = { lat, lon };
+  state.selectionFollowsGps = fromGps;
+  if (!fromGps) {
+    userChoseManually();
+  }
+  // Line suggestions are ranked by the report position, so they are replaced when it moves.
+  if (!routePicked && routeInput.value.trim()) {
+    routeSuggestions.show([]);
+    searchRoute();
+  }
   selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
     state.selectionMarker = L.marker([lat, lon], {
       draggable: true,
       icon: makeIcon("bee-dot"),
+      title: "Valgt rapportposisjon",
     }).addTo(map);
-    state.selectionMarker.on("dragend", (event) => {
-      const point = event.target.getLatLng();
-      updateSelection(point.lat, point.lng);
-      loadNearbyStop(point.lat, point.lng);
-    });
+    state.selectionMarker.on("dragend", (event) => selectPoint(event.target.getLatLng()));
   } else {
     state.selectionMarker.setLatLng([lat, lon]);
   }
+}
+
+function selectPoint(point) {
+  // Panning past the date line shows copies of the world; wrap back to -180..180.
+  const { lat, lng } = map.wrapLatLng(point);
+  updateSelection(lat, lng);
+  loadNearbyStop(lat, lng);
 }
 
 function updateCurrentLocation(lat, lon, accuracy) {
   if (!state.currentLocationMarker) {
     state.currentLocationMarker = L.marker([lat, lon], {
       icon: makeIcon("user-dot"),
+      title: "Din posisjon",
     })
       .addTo(map)
       .bindPopup("Du er her");
@@ -190,6 +400,8 @@ function updateCurrentLocation(lat, lon, accuracy) {
 }
 
 function renderFeed(items) {
+  // The list is rebuilt on every refresh, so keyboard focus returns to the same like button.
+  const focusedId = document.activeElement?.dataset?.likeId;
   if (!items.length) {
     feed.innerHTML = "<p class='tiny'>Ingen aktive observasjoner akkurat nå.</p>";
     return;
@@ -207,31 +419,58 @@ function renderFeed(items) {
           ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
           <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
           <div class="feed-actions">
-            <span class="tiny">${item.distance_to_stop_m ? `${item.distance_to_stop_m} m fra nærmeste stopp` : "Posisjon manuelt valgt"}</span>
-            <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
-              ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
-            </button>
+            <span class="tiny">${item.distance_to_stop_m != null ? `${formatDistance(item.distance_to_stop_m)} fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
+            <div class="feed-buttons">
+              <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
+                ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
+              </button>
+              ${item.mine
+                ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}">Slett</button>`
+                : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}">Rapporter</button>`}
+            </div>
           </div>
         </article>
       `
     )
     .join("");
+  if (focusedId) {
+    feed.querySelector(`[data-like-id="${CSS.escape(focusedId)}"]`)?.focus();
+  }
 }
 
+// Markers are updated in place, so a refresh does not close an open popup.
+const sightingMarkers = new Map();
+
 function renderSightings(items) {
-  state.sightingsLayer.clearLayers();
+  const current = new Set(items.map((item) => item.id));
+  sightingMarkers.forEach((marker, id) => {
+    if (!current.has(id)) {
+      state.sightingsLayer.removeLayer(marker);
+      sightingMarkers.delete(id);
+    }
+  });
 
   items.forEach((item) => {
-    const marker = L.marker([item.lat, item.lon], {
-      icon: makeIcon(markerAgeClass(item.created_at)),
-    });
-    marker.bindPopup(`
+    const ageClass = markerAgeClass(item.created_at);
+    let marker = sightingMarkers.get(item.id);
+    if (!marker) {
+      marker = L.marker([item.lat, item.lon], {
+        icon: makeIcon(ageClass),
+        title: `Observasjon ved ${item.stop_name || "ukjent sted"}`,
+      })
+        .bindPopup("")
+        .addTo(state.sightingsLayer);
+      sightingMarkers.set(item.id, marker);
+    } else if (marker.ageClass !== ageClass) {
+      marker.setIcon(makeIcon(ageClass));
+    }
+    marker.ageClass = ageClass;
+    marker.setPopupContent(`
       <strong>${escapeHtml(item.stop_name || "Ukjent sted")}</strong><br />
       ${item.route ? `Linje ${escapeHtml(item.route)}<br />` : ""}
       ${item.note ? `${escapeHtml(item.note)}<br />` : ""}
-      <span>${item.likes_count} bekreftelser · ${escapeHtml(item.reporter || "Anonym")} · ${formatAge(item.created_at)}</span>
+      <span>${confirmations(item.likes_count)} · ${escapeHtml(item.reporter || "Anonym")} · ${formatAge(item.created_at)}</span>
     `);
-    marker.addTo(state.sightingsLayer);
   });
 }
 
@@ -241,75 +480,154 @@ async function loadConfig() {
 }
 
 async function loadCurrentUser() {
-  const payload = await fetchJson("/api/me");
-  state.user = payload.user;
-  state.stats = payload.stats;
-  updateAuthUi();
+  const payload = await fetchLatest("me", "/api/me");
+  if (payload) {
+    setUser(payload.user, payload.stats);
+  }
 }
 
 async function loadSightings() {
-  const payload = await fetchJson("/api/sightings");
-  renderFeed(payload.items);
-  renderSightings(payload.items);
+  const payload = await fetchLatest("sightings", "/api/sightings");
+  if (payload) {
+    feedStatus.textContent = "";
+    renderFeed(payload.items);
+    renderSightings(payload.items);
+  }
 }
 
-// Only the newest position change or stop search may fill in the stop; older answers are dropped.
-let stopRequest = 0;
+let refreshing = null;
+// A refresh replaces an older one; the 20 s poll waits for a running refresh instead of aborting it.
+function refresh() {
+  const run = (async () => {
+    try {
+      const results = await Promise.allSettled([loadSightings(), loadCurrentUser()]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed) {
+        throw failed.reason;
+      }
+    } finally {
+      if (refreshing === run) {
+        refreshing = null;
+      }
+    }
+  })();
+  refreshing = run;
+  return run;
+}
+// Load errors are shown by the list, so they never hide the result of an action.
+const showLoadError = (error) => {
+  feedStatus.textContent = error.message;
+};
 
-async function loadNearbyStop(lat, lon) {
-  const request = ++stopRequest;
-  nearestStop.textContent = "Laster...";
+// Empties the stop field, and outdates its pending searches and suggestions.
+function clearStop() {
+  outdate("stop");
+  stopSearch = Promise.resolve(); // A failed search no longer stops publishing.
+  stopSuggestions.close();
   stopInput.value = "";
   stopInput.dataset.stopId = "";
+  stopInput.dataset.fromGps = "false";
+}
+
+async function loadNearbyStop(lat, lon, replaceStop = true) {
+  if (replaceStop) {
+    clearStop(); // A newer position also outdates pending stop searches.
+  }
+  nearestStop.textContent = "Laster...";
   try {
-    const payload = await fetchJson(`/api/stops/nearby?lat=${lat}&lon=${lon}`);
-    if (request !== stopRequest) {
+    const payload = await fetchLatest("nearby", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
+    if (!payload) {
       return;
     }
     const [closest] = payload.items;
-    if (!closest) {
-      nearestStop.textContent = "Fant ingen holdeplass.";
-      return;
+    nearestStop.textContent = closest
+      ? `${closest.name} (${formatDistance(closest.distance_m)})`
+      : "Fant ingen holdeplass innen 2 km.";
+    // Fill in the stop unless the user has started typing one meanwhile.
+    if (closest && !stopInput.value) {
+      stopInput.value = closest.name;
+      stopInput.dataset.stopId = closest.id;
+      stopInput.dataset.fromGps = String(state.selectionFollowsGps);
     }
-    nearestStop.textContent = `${closest.name} (${closest.distance_m} m)`;
-    stopInput.value = closest.name;
-    stopInput.dataset.stopId = closest.id;
   } catch (error) {
-    if (request === stopRequest) {
-      nearestStop.textContent = error.message;
-    }
+    nearestStop.textContent = error.message;
   }
 }
 
-function renderOptions(datalistEl, items, toLabel) {
-  datalistEl.innerHTML = items
-    .map((item) => `<option value="${escapeHtml(toLabel(item))}"></option>`)
-    .join("");
-}
-
-async function likeSighting(id) {
-  await fetchJson(`/api/sightings/${encodeURIComponent(id)}/like`, {
-    method: "POST",
+// Stops that share a name, such as "Sentrum" in many towns or the bus, tram and metro stations at
+// Jernbanetorget, get their mode, description, platform and distance, or else their ID, so each
+// option is one stop.
+function stopChoices(stops) {
+  const count = (values, value) => values.filter((other) => other === value).length;
+  const names = stops.map((stop) => stop.name);
+  const labels = stops.map((stop) => {
+    const details = [
+      stop.mode,
+      stop.description,
+      stop.platform && `plattform ${stop.platform}`,
+      stop.distance_m != null && formatDistance(stop.distance_m),
+    ].filter(Boolean);
+    return count(names, stop.name) > 1 && details.length ? `${stop.name} (${details.join(", ")})` : stop.name;
   });
-  await loadSightings();
-  if (state.user) {
-    await loadCurrentUser();
-  }
+  return stops.map((stop, index) => ({
+    stop,
+    label: count(labels, labels[index]) > 1 ? `${stop.name} (${stop.id})` : labels[index],
+  }));
+}
+
+function selectStop({ stop, label }) {
+  outdate("nearby"); // The position moves to this stop, so a pending nearby answer is outdated.
+  updateSelection(stop.lat, stop.lon);
+  map.panTo([stop.lat, stop.lon]);
+  nearestStop.textContent = `${label} (valgt)`;
+  stopInput.dataset.stopId = stop.id;
+  stopInput.dataset.fromGps = "false";
+}
+
+// GPS fixes can come faster than nearby answers, so one lookup runs at a time and then catches up
+// with the newest fix, instead of each fix aborting the last.
+let gpsFix = null;
+let gpsLookup = null;
+// Publishing waits for the GPS button's answer, unless the user picks a spot or types a stop meanwhile.
+let gpsWait = Promise.resolve();
+let releaseGpsWait = () => {};
+let gpsButtonFailures = 0;
+
+// A spot the user picks or a stop they type wins over GPS answers and lookups still pending.
+function userChoseManually() {
+  state.manualChanges++;
+  gpsFix = null;
+  releaseGpsWait();
+}
+
+function lookUpStopForGps(lat, lon, fromButton) {
+  gpsFix = { lat, lon, fromButton: fromButton || Boolean(gpsFix?.fromButton) };
+  gpsLookup ??= (async () => {
+    while (gpsFix) {
+      const fix = gpsFix;
+      gpsFix = null;
+      // A stop GPS filled in follows too, but GPS leaves a stop the user is typing, and its search, alone.
+      const replaceStop = fix.fromButton || !stopInput.value || stopInput.dataset.fromGps === "true";
+      await loadNearbyStop(fix.lat, fix.lon, replaceStop);
+    }
+    gpsLookup = null;
+  })();
 }
 
 function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
   const { latitude, longitude, accuracy } = position.coords;
   updateCurrentLocation(latitude, longitude, accuracy);
-  if (selectLocation || !state.selectedLatLng) {
-    updateSelection(latitude, longitude);
-    loadNearbyStop(latitude, longitude);
+  if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
+    updateSelection(latitude, longitude, true);
+    if (selectLocation) {
+      clearStop(); // At once, so an older stop search cannot move the report while the lookup waits its turn.
+    }
+    lookUpStopForGps(latitude, longitude, selectLocation);
   }
   if (shouldCenter || !state.hasAutoCentered) {
     map.flyTo([latitude, longitude], 14);
     state.hasAutoCentered = true;
   }
-  locateBtn.disabled = false;
-  setStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
 }
 
 function startLocationTracking(selectLocation = false) {
@@ -319,11 +637,28 @@ function startLocationTracking(selectLocation = false) {
   }
 
   locateBtn.disabled = true;
+  const changesBefore = state.manualChanges;
+  const setGpsStatus = lateStatus();
+  let release = () => {};
+  if (selectLocation) {
+    gpsWait = new Promise((resolve) => (release = resolve));
+    releaseGpsWait = release;
+  }
   navigator.geolocation.getCurrentPosition(
-    (position) => handleLocationUpdate(position, true, selectLocation),
+    (position) => {
+      locateBtn.disabled = false;
+      setGpsStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
+      // A spot picked or a stop typed by hand while GPS was answering wins over the button press.
+      handleLocationUpdate(position, true, selectLocation && state.manualChanges === changesBefore);
+      release();
+    },
     () => {
       locateBtn.disabled = false;
-      setStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      setGpsStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      if (selectLocation && state.manualChanges === changesBefore) {
+        gpsButtonFailures++; // A report waiting for this position is not sent from the old one.
+      }
+      release();
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
@@ -333,62 +668,114 @@ function startLocationTracking(selectLocation = false) {
   }
   state.watchId = navigator.geolocation.watchPosition(
     (position) => handleLocationUpdate(position, false),
-    () => {
+    (error) => {
+      if (error.code === error.PERMISSION_DENIED) {
+        // The browser has ended this watch, so the next button press starts a new one.
+        navigator.geolocation.clearWatch(state.watchId);
+        state.watchId = null;
+      }
       if (!state.currentLocationMarker) {
-        setStatus("Lokasjonstjenester er blokkert eller utilgjengelige.", "error");
+        setGpsStatus("Lokasjonstjenester er blokkert eller utilgjengelige.", "error");
       }
     },
     { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 }
   );
 }
 
-stopInput.addEventListener("input", async () => {
-  const request = ++stopRequest;
+// Publishing waits for this, since a search may still move the report position.
+let stopSearch = Promise.resolve();
+
+stopInput.addEventListener("input", () => (stopSearch = searchStop()));
+
+async function searchStop() {
   const query = stopInput.value.trim();
+  userChoseManually();
   stopInput.dataset.stopId = "";
-  if (query.length < 2) {
-    stopOptions.innerHTML = "";
-    return;
+  stopInput.dataset.fromGps = "false";
+  stopSuggestions.typed();
+  try {
+    // Results closest to what the map shows come first.
+    const { lat, lng } = map.wrapLatLng(map.getCenter());
+    const payload = await fetchLatest("stop", `/api/stops/search?q=${encodeURIComponent(query)}&lat=${lat}&lon=${lng}`);
+    if (!payload) {
+      return;
+    }
+    const choices = stopChoices(payload.items);
+    stopSuggestions.show(choices);
+    // A fully typed name, in any case, picks its stop when no other stop in the list shares it.
+    const exact = choices.filter((choice) => choice.label.toLowerCase() === query.toLowerCase());
+    if (exact.length === 1) {
+      selectStop(exact[0]);
+    }
+    // With stops found but none picked, publishing asks for one; a name with no stop found is kept as typed.
+    return choices.length && exact.length !== 1 ? "unpicked" : "ok";
+  } catch (error) {
+    stopSuggestions.show([]);
+    nearestStop.textContent = error.message;
+    return "failed"; // Publishing stops rather than send this name with a position it may not belong to.
   }
-  const payload = await fetchJson(`/api/stops/search?q=${encodeURIComponent(query)}`);
-  if (request !== stopRequest) {
-    return;
-  }
-  renderOptions(stopOptions, payload.items, (item) => item.name);
-  const exact = payload.items.find((item) => item.name === query);
-  if (exact) {
-    updateSelection(exact.lat, exact.lon);
-    map.panTo([exact.lat, exact.lon]);
-    nearestStop.textContent = `${exact.name} (valgt)`;
-    stopInput.dataset.stopId = exact.id;
-  }
+}
+
+routeInput.addEventListener("input", () => {
+  routePicked = false;
+  routeSuggestions.typed();
+  return searchRoute();
 });
 
-routeInput.addEventListener("input", async () => {
-  const query = routeInput.value.trim();
-  const payload = await fetchJson(`/api/routes?q=${encodeURIComponent(query)}`);
-  renderOptions(routeOptions, payload.items, (item) => item.short_name);
-});
+async function searchRoute() {
+  const setRouteStatus = lateStatus();
+  try {
+    // Lines stopping near the report come first, so "3" by Gløshaugen is AtB's line 3.
+    const center = map.wrapLatLng(map.getCenter());
+    const { lat, lon } = state.selectedLatLng ?? { lat: center.lat, lon: center.lng };
+    const query = encodeURIComponent(routeInput.value.trim());
+    const payload = await fetchLatest("route", `/api/routes?q=${query}&lat=${lat}&lon=${lon}`);
+    if (payload) {
+      routeSuggestions.show(payload.items); // Each value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
+    }
+  } catch (error) {
+    routeSuggestions.show([]);
+    setRouteStatus(error.message, "error");
+  }
+}
+
+// Likes, reports and deletes are idempotent on the server, so the buttons stay enabled.
+const feedActions = {
+  likeId: { action: "like" },
+  reportId: {
+    action: "report",
+    question: "Rapportere observasjonen som feil eller upassende? Den skjules for deg nå, og for alle etter tre rapporter.",
+    done: "Observasjonen er rapportert og skjult for deg.",
+  },
+  deleteId: { action: "delete", question: "Slette observasjonen din?", done: "Observasjonen er slettet." },
+};
 
 feed.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-like-id]");
+  const button = event.target.closest("[data-like-id], [data-report-id], [data-delete-id]");
   if (!button) {
     return;
   }
-  button.disabled = true;
+  const key = Object.keys(feedActions).find((name) => button.dataset[name]);
+  const { action, question, done } = feedActions[key];
+  // Logged out, the server's answer asks the user to log in, so there is nothing to confirm.
+  if (question && state.user && !confirm(question)) {
+    return;
+  }
   try {
-    await likeSighting(button.dataset.likeId);
+    await fetchJson(`/api/sightings/${encodeURIComponent(button.dataset[key])}/${action}`, { method: "POST" });
   } catch (error) {
     setStatus(error.message, "error");
-  } finally {
-    button.disabled = false;
+    return;
   }
+  if (done) {
+    setStatus(done, "ok");
+  }
+  refresh().catch(showLoadError);
 });
 
-map.on("click", async (event) => {
-  updateSelection(event.latlng.lat, event.latlng.lng);
-  await loadNearbyStop(event.latlng.lat, event.latlng.lng);
-});
+map.on("click", (event) => selectPoint(event.latlng));
+
+centerBtn.addEventListener("click", () => selectPoint(map.getCenter()));
 
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);
@@ -396,107 +783,129 @@ locateBtn.addEventListener("click", () => {
 
 reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const submitButton = reportForm.querySelector("button[type='submit']");
+  submitButton.disabled = true;
+  // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
+  const failuresBefore = gpsButtonFailures;
+  let waits;
+  let search;
+  do {
+    waits = [stopSearch, gpsWait];
+    [search] = await Promise.all(waits);
+  } while (waits[0] !== stopSearch || waits[1] !== gpsWait);
+  const searchProblem = search === "failed"
+    ? "Holdeplassøket feilet, så observasjonen ble ikke sendt. Prøv igjen, eller velg et sted i kartet."
+    : search === "unpicked" && !stopInput.dataset.stopId
+      ? "Velg holdeplassen i forslagslisten, eller velg et sted i kartet."
+      : "";
+  if (searchProblem) {
+    submitButton.disabled = false;
+    setStatus(searchProblem, "error");
+    return;
+  }
+  if (gpsButtonFailures !== failuresBefore) {
+    submitButton.disabled = false;
+    setStatus("Fant ikke posisjonen din. Velg et sted i kartet eller trykk «Bruk min posisjon» igjen.", "error");
+    return;
+  }
   if (!state.selectedLatLng) {
+    submitButton.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
     return;
   }
-
-  const submitButton = reportForm.querySelector("button[type='submit']");
-  submitButton.disabled = true;
   setStatus("Publiserer...");
 
+  const note = noteInput.value.trim();
+  // A stop GPS filled in may be one fix behind; the server picks the stop nearest the position sent.
+  const stopFromGps = stopInput.dataset.fromGps === "true";
+  let item;
   try {
-    await fetchJson("/api/sightings", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        lat: state.selectedLatLng.lat,
-        lon: state.selectedLatLng.lon,
-        stop_name: stopInput.value.trim(),
-        stop_id: stopInput.dataset.stopId || "",
-        route: routeInput.value.trim(),
-        note: noteInput.value.trim(),
-      }),
+    item = await postJson("/api/sightings", {
+      lat: state.selectedLatLng.lat,
+      lon: state.selectedLatLng.lon,
+      stop_name: stopFromGps ? "" : stopInput.value.trim(),
+      stop_id: stopFromGps ? "" : stopInput.dataset.stopId || "",
+      route: routeInput.value.trim(),
+      note,
     });
-
-    noteInput.value = "";
-    setStatus(state.user ? "Observasjonen er publisert på profilen din." : "Observasjonen er publisert anonymt.", "ok");
-    await loadSightings();
-    if (state.user) {
-      await loadCurrentUser();
-    }
   } catch (error) {
     setStatus(error.message, "error");
+    return;
   } finally {
     submitButton.disabled = false;
   }
+  if (noteInput.value.trim() === note) {
+    noteInput.value = ""; // Keep a new note typed while this one was sent.
+  }
+  setStatus(
+    item.reporter === "Anonym" ? "Observasjonen er publisert anonymt." : `Observasjonen er publisert som ${item.reporter}.`,
+    "ok"
+  );
+  refresh().catch(showLoadError);
 });
 
 authToggle.addEventListener("click", () => {
   toggleAuth();
 });
 
-loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const username = document.querySelector("#loginUsername").value.trim();
-  const password = document.querySelector("#loginPassword").value;
-  try {
-    await fetchJson("/api/auth/login", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ username, password }),
-    });
-    await loadCurrentUser();
-    await loadSightings();
-    toggleAuth(true);
-    setAuthStatus("Innlogging vellykket.", "ok");
-    loginForm.reset();
-  } catch (error) {
-    setAuthStatus(error.message, "error");
-  }
-});
+// Login, registration and logout run one at a time: a late answer would set its cookie anyway.
+let authBusy = false;
 
-registerForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const username = document.querySelector("#registerUsername").value.trim();
-  const password = document.querySelector("#registerPassword").value;
-  try {
-    await fetchJson("/api/auth/register", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ username, password }),
-    });
-    await loadCurrentUser();
-    await loadSightings();
-    toggleAuth(true);
-    setAuthStatus("Profil opprettet.", "ok");
-    registerForm.reset();
-  } catch (error) {
-    setAuthStatus(error.message, "error");
+async function runAuth(action) {
+  if (authBusy) {
+    return;
   }
-});
+  authBusy = true;
+  try {
+    await action();
+  } finally {
+    authBusy = false;
+  }
+}
 
-logoutBtn.addEventListener("click", async () => {
-  await fetchJson("/api/auth/logout", {
-    method: "POST",
+function handleAuthForm(form, url, message) {
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return runAuth(async () => {
+      const [username, password] = form.querySelectorAll("input");
+      try {
+        const payload = await postJson(url, { username: username.value.trim(), password: password.value });
+        setUser(payload.user);
+      } catch (error) {
+        setAuthStatus(error.message, "error");
+        return;
+      }
+      setAuthStatus(message, "ok");
+      form.reset();
+      refresh().catch(showLoadError);
+    });
   });
-  state.user = null;
-  state.stats = null;
-  updateAuthUi();
-  setAuthStatus("Du er logget ut. Observasjoner kan fortsatt sendes anonymt.", "ok");
-  await loadSightings();
-});
+}
+
+handleAuthForm(loginForm, "/api/auth/login", "Innlogging vellykket.");
+handleAuthForm(registerForm, "/api/auth/register", "Profil opprettet.");
+
+logoutBtn.addEventListener("click", () =>
+  runAuth(async () => {
+    try {
+      await fetchJson("/api/auth/logout", { method: "POST" });
+    } catch (error) {
+      setAuthStatus(error.message, "error");
+      return;
+    }
+    setUser(null);
+    setAuthStatus("Du er logget ut. Observasjoner kan fortsatt sendes anonymt.", "ok");
+    refresh().catch(showLoadError);
+  })
+);
 
 // Each part starts on its own, so one failed request cannot stop GPS or refreshing.
-const showLoadError = (error) => setStatus(error.message, "error");
 loadConfig().catch(showLoadError);
 loadCurrentUser().catch((error) => setAuthStatus(error.message, "error"));
 loadSightings().catch(showLoadError);
 startLocationTracking();
-setInterval(() => Promise.all([loadSightings(), loadCurrentUser()]).catch(showLoadError), 20000);
+setInterval(() => {
+  if (!refreshing) {
+    refresh().catch(showLoadError);
+  }
+}, 20000);
