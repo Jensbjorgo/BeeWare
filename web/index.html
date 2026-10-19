@@ -50,26 +50,29 @@
         <section class="card">
           <div class="section-head">
             <h2>Ny observasjon</h2>
-            <button id="locateBtn" class="ghost location-button" type="button" aria-label="Bruk min posisjon"><svg class="icon" aria-hidden="true"><use href="#i-locate" /></svg><span>Min posisjon</span></button>
+            <button id="locateBtn" class="location-button" type="button" aria-label="Bruk min posisjon"><svg class="icon" aria-hidden="true"><use href="#i-locate" /></svg><span>Min posisjon</span></button>
           </div>
 
           <form id="reportForm">
-            <label>
-              <span class="field-label"><svg class="icon" aria-hidden="true"><use href="#i-pin" /></svg>Sted eller holdeplass</span>
+            <div class="form-field">
               <input id="stopInput" name="stop_name" type="text" placeholder="Søk holdeplass eller trykk i kartet" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="stopOptions" autocomplete="off" maxlength="80" />
-            </label>
+              <label for="stopInput"><svg class="icon" aria-hidden="true"><use href="#i-pin" /></svg>Sted eller holdeplass</label>
+              <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+            </div>
             <ul id="stopOptions" class="suggestions" role="listbox" aria-label="Holdeplasser" hidden></ul>
 
-            <label>
-              <span class="field-label"><svg class="icon" aria-hidden="true"><use href="#i-bus" /></svg>Linje (valgfritt)</span>
+            <div class="form-field">
               <input id="routeInput" name="route" type="text" placeholder="For eksempel 100 eller M1" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="routeOptions" autocomplete="off" maxlength="100" />
-            </label>
+              <label for="routeInput"><svg class="icon" aria-hidden="true"><use href="#i-bus" /></svg>Linje (valgfritt)</label>
+              <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+            </div>
             <ul id="routeOptions" class="suggestions" role="listbox" aria-label="Linjer" hidden></ul>
 
-            <label>
-              Kort beskrivelse
+            <div class="form-field">
               <textarea id="noteInput" name="note" rows="3" maxlength="160" placeholder="For eksempel truende oppførsel ved inngangen til holdeplassen"></textarea>
-            </label>
+              <label for="noteInput">Kort beskrivelse</label>
+              <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+            </div>
 
             <button type="submit" class="primary publish-button"><svg class="icon" aria-hidden="true"><use href="#i-send" /></svg>Publiser observasjon</button>
             <p id="formStatus" class="status" role="status"></p>
@@ -97,42 +100,59 @@
           <div id="authContent" class="card hidden" hidden>
             <div id="authForms">
               <form id="loginForm" class="auth-form">
-                <label>
-                  Brukernavn
+                <div class="form-field">
                   <input id="loginUsername" type="text" placeholder="brukernavn" autocomplete="username" required />
-                </label>
-                <label>
-                  Passord
+                  <label for="loginUsername">Brukernavn</label>
+                  <svg class="field-feedback field-valid icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <svg class="field-feedback field-invalid icon" aria-hidden="true"><use href="#i-close" /></svg>
+                  <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+                </div>
+                <div class="form-field">
                   <input id="loginPassword" type="password" placeholder="passord" autocomplete="current-password" required />
-                </label>
+                  <label for="loginPassword">Passord</label>
+                  <svg class="field-feedback field-valid icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <svg class="field-feedback field-invalid icon" aria-hidden="true"><use href="#i-close" /></svg>
+                  <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+                </div>
                 <button type="submit" class="primary">Logg inn</button>
               </form>
 
               <form id="registerForm" class="auth-form">
-                <label>
-                  Nytt brukernavn
+                <div class="form-field">
                   <input id="registerUsername" type="text" placeholder="3–24 tegn: a–z, 0–9, - og _" autocomplete="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_\-]+" title="3–24 tegn: a–z, tall, bindestrek og understrek" />
-                </label>
-                <label>
-                  Nytt passord
+                  <label for="registerUsername">Nytt brukernavn</label>
+                  <svg class="field-feedback field-valid icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <svg class="field-feedback field-invalid icon" aria-hidden="true"><use href="#i-close" /></svg>
+                  <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+                </div>
+                <div class="form-field">
                   <input id="registerPassword" type="password" placeholder="minst 6 tegn" autocomplete="new-password" required minlength="6" />
-                </label>
+                  <label for="registerPassword">Nytt passord</label>
+                  <svg class="field-feedback field-valid icon" aria-hidden="true"><use href="#i-check" /></svg>
+                  <svg class="field-feedback field-invalid icon" aria-hidden="true"><use href="#i-close" /></svg>
+                  <svg class="field-line" viewBox="0 -16 300 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0 0 Q150 0 300 0"><animate attributeName="d" values="M0 0 Q150 0 300 0;M0 0 Q150 28 300 0;M0 0 Q150 -20 300 0;M0 0 Q150 0 300 0" keyTimes="0;0.3;0.65;1" dur="640ms" begin="indefinite" /></path></svg>
+                </div>
                 <button type="submit" class="ghost strong">Lag bruker</button>
               </form>
             </div>
 
             <div id="userPanel" class="user-panel hidden">
-              <p id="currentUsername" class="profile-name"></p>
-              <div class="user-stats">
-                <span id="userLevel">Level 1</span>
-                <span id="userXp">0 XP</span>
-                <span id="userConfirmations">0 bekreftelser</span>
+              <div class="profile-avatar" aria-hidden="true">
+                <svg viewBox="0 0 40 40"><use href="#bee-mark" /></svg>
               </div>
-              <div id="xpProgressWrap" class="xp-progress" hidden>
-                <progress id="xpProgress" max="10" value="0" aria-label="Fremgang til neste level"></progress>
-                <p id="xpProgressText" class="tiny"></p>
+              <div class="profile-info">
+                <p id="currentUsername" class="profile-name"></p>
+                <div class="user-stats">
+                  <span id="userLevel">Level 1</span>
+                  <span id="userXp">0 XP</span>
+                  <span id="userConfirmations">0 bekreftelser</span>
+                </div>
+                <div id="xpProgressWrap" class="xp-progress" hidden>
+                  <progress id="xpProgress" max="10" value="0" aria-label="Fremgang til neste level"></progress>
+                  <p id="xpProgressText" class="tiny"></p>
+                </div>
               </div>
-              <button id="logoutBtn" class="ghost profile-logout" type="button" aria-label="Logg ut" title="Logg ut"><svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg></button>
+              <button id="logoutBtn" class="profile-logout" type="button"><svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg>Logg ut</button>
             </div>
 
             <p id="authStatus" class="status" role="status"></p>
@@ -152,6 +172,8 @@
     <script src="/vendor/maplibre-gl-csp.js"></script>
     <script src="/vendor/leaflet-maplibre-gl.js"></script>
     <script src="/basemap.js"></script>
+    <script src="/fields.js" type="module"></script>
+    <script src="/cards.js" type="module"></script>
     <script src="/app.js?v=8" type="module"></script>
   </body>
 </html>

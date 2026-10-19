@@ -84,12 +84,12 @@ menuBackdrop.addEventListener("click", () => toggleMenu(false));
 // Keyboard dismissal also works when focus is inside either panel.
 [sidePanel, authContent].forEach((panel) => panel.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (menuOpen) {
-    toggleMenu(false);
-    menuToggle.focus();
-  } else if (state.authOpen) {
+  if (panel === authContent && state.authOpen) {
     toggleAuth(false);
     authToggle.focus();
+  } else if (menuOpen) {
+    toggleMenu(false);
+    menuToggle.focus();
   }
 }));
 const userLevel = document.querySelector("#userLevel");
@@ -349,6 +349,7 @@ function setUser(user, stats = null) {
 
 function updateAuthUi() {
   const loggedIn = Boolean(state.user);
+  authContent.classList.toggle("is-logged-in", loggedIn);
   authForms.classList.toggle("hidden", loggedIn);
   userPanel.classList.toggle("hidden", !loggedIn);
   currentUsername.textContent = loggedIn ? state.user.username : "";
@@ -437,25 +438,27 @@ function renderFeed(items) {
   feed.innerHTML = items
     .map(
       (item) => `
-        <article class="feed-item" data-sighting-id="${escapeHtml(item.id)}">
-          <header>
-            <strong>${escapeHtml(item.stop_name || "Ukjent sted")}</strong>
-            <span class="tiny">${formatAge(item.created_at)}</span>
-          </header>
-          ${item.route ? `<div class="pill">Linje ${escapeHtml(item.route)}</div>` : ""}
-          ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
-          <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
-          <div class="feed-actions">
-            <div class="feed-buttons">
-              <button class="ghost like-button${item.liked_by_me ? " is-selected" : ""}" type="button" aria-pressed="${Boolean(item.liked_by_me)}" data-like-id="${escapeHtml(item.id)}">
-                <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>${item.liked_by_me ? "Bekreftet" : "Bekreft"}<span class="action-count">${item.likes_count}</span>
-              </button>
-              ${item.mine
-                ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-trash" /></svg>Slett</button>`
-                : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-flag" /></svg>Rapporter</button>`}
+        <div class="feed-card">
+          <article class="feed-item" data-sighting-id="${escapeHtml(item.id)}">
+            <header>
+              <strong>${escapeHtml(item.stop_name || "Ukjent sted")}</strong>
+              <span class="tiny">${formatAge(item.created_at)}</span>
+            </header>
+            ${item.route ? `<div class="pill">Linje ${escapeHtml(item.route)}</div>` : ""}
+            ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
+            <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
+            <div class="feed-actions">
+              <div class="feed-buttons">
+                <button class="ghost like-button${item.liked_by_me ? " is-selected" : ""}" type="button" aria-pressed="${Boolean(item.liked_by_me)}" data-like-id="${escapeHtml(item.id)}">
+                  <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>${item.liked_by_me ? "Bekreftet" : "Bekreft"}<span class="action-count">${item.likes_count}</span>
+                </button>
+                ${item.mine
+                  ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-trash" /></svg>Slett</button>`
+                  : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-flag" /></svg>Rapporter</button>`}
+              </div>
             </div>
-          </div>
-        </article>
+          </article>
+        </div>
       `
     )
     .join("");
