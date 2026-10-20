@@ -346,6 +346,7 @@ textarea:focus::placeholder { opacity: 1; transition-delay: 150ms; }
 .location-button:focus-visible:not(:disabled)::after { bottom: 2px; left: 2px; }
 .location-button:active:not(:disabled) { transform: rotate(-2deg) scale(0.98); }
 .location-button .icon { width: 16px; height: 16px; }
+.location-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 
 .tiny { color: var(--muted); font-size: 12px; line-height: 1.5; }
 

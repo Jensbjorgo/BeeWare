@@ -193,12 +193,18 @@ test("GPS recovery preserves a newer form error and timeouts do not claim permis
   assert.equal(app.element("#mobileFormStatus").textContent, message);
 });
 
-test("form messages disappear after three seconds in both layouts", async () => {
+test("form messages disappear after three seconds in both layouts, but errors stay", async () => {
   const app = await setup();
-  await app.element("#reportForm").submit({ preventDefault() {} });
+  const submit = () => app.element("#reportForm").submit({ preventDefault() {} });
   const status = app.element("#formStatus");
   const mobileStatus = app.element("#mobileFormStatus");
+  await submit();
   assert.match(status.textContent, /Velg først en posisjon/);
+  app.advanceTime(10000);
+  assert.match(status.textContent, /Velg først en posisjon/);  // An error says what to fix.
+  app.updateSelection(58, 8);
+  await submit();
+  assert.match(status.textContent, /publisert/);
   assert.equal(mobileStatus.textContent, status.textContent);
   app.advanceTime(2999);
   assert.ok(status.textContent);
@@ -207,22 +213,25 @@ test("form messages disappear after three seconds in both layouts", async () => 
   assert.equal(mobileStatus.textContent, "");
 });
 
-test("triggering a message again restarts its three seconds and can show it after expiry", async () => {
-  const app = await setup();
+test("a new message restarts the three seconds, and hiding an old one keeps late errors", async () => {
+  let answerRoutes;
+  const app = await setup((url) => url.startsWith("/api/routes") ? new Promise((resolve) => { answerRoutes = resolve; }) : undefined);
   const submit = () => app.element("#reportForm").submit({ preventDefault() {} });
   const status = app.element("#formStatus");
+  app.updateSelection(58, 8);
   await submit();
   app.advanceTime(2000);
   await submit();
-  app.advanceTime(1000);
-  assert.match(status.textContent, /Velg først en posisjon/);
-  app.advanceTime(1999);
-  assert.ok(status.textContent);
+  app.advanceTime(2999);
+  assert.match(status.textContent, /publisert/);
+  const route = app.element("#routeInput");
+  route.value = "3";
+  route.input();  // Starts while the message is shown ...
   app.advanceTime(1);
   assert.equal(status.textContent, "");
-  await submit();
-  assert.match(status.textContent, /Velg først en posisjon/);
-  assert.equal(app.element("#mobileFormStatus").textContent, status.textContent);
+  answerRoutes(reply({ error: "Linjesøket feilet" }, false));  // ... and fails after it is gone.
+  await settle();
+  assert.match(status.textContent, /Linjesøket feilet/);
 });
 
 test("an automatic GPS position and its stop follow newer fixes until the user types a stop", async () => {
@@ -1009,4 +1018,10 @@ test("line suggestions follow the report position until a line is picked", async
   assert.equal(route.value, "3 · AtB");
   app.updateSelection(59.91, 10.75);
   assert.equal(answers.length, 2);  // A picked line is not searched again.
+});
+
+test("the map centre button sets the report position, for keyboard users without GPS", async () => {
+  const app = await setup();
+  app.element("#centerBtn").click();
+  assert.deepEqual([app.state.selectedLatLng.lat, app.state.selectedLatLng.lon], [59.91, 10.75]);
 });

@@ -295,19 +295,22 @@ let statusVersion = 0;
 let statusSource = "";
 let statusTimer;
 
-function setStatus(message, type = "", source = "") {
-  clearTimeout(statusTimer);
-  statusVersion++;
-  statusSource = source;
+function showStatus(message, type = "") {
   formStatus.textContent = message;
   formStatus.className = type ? `status ${type}` : "status";
   mobileFormStatus.textContent = message;
   mobileFormStatus.className = formStatus.className;
-  if (message) {
-    const version = statusVersion;
-    statusTimer = setTimeout(() => {
-      if (statusVersion === version) setStatus("");
-    }, 3000);
+}
+
+function setStatus(message, type = "", source = "") {
+  clearTimeout(statusTimer);
+  statusVersion++;
+  statusSource = source;
+  showStatus(message, type);
+  // Other messages fade after 3 s; errors stay until replaced, since they say what to fix.
+  // Hiding leaves statusVersion alone, so a late error from an older action can still show.
+  if (message && type !== "error") {
+    statusTimer = setTimeout(() => showStatus(""), 3000);
   }
 }
 
@@ -820,6 +823,9 @@ feed.addEventListener("click", async (event) => {
 });
 
 map.on("click", (event) => selectPoint(event.latlng));
+
+// Without GPS, keyboard users move the map with the arrow keys and pick its centre here.
+document.querySelector("#centerBtn").addEventListener("click", () => selectPoint(map.getCenter()));
 
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);
