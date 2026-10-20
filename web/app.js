@@ -669,7 +669,7 @@ function handleLocationUpdate(position, shouldCenter = false, selectLocation = f
   const { latitude, longitude, accuracy } = position.coords;
   updateCurrentLocation(latitude, longitude, accuracy);
   // A recovered fix clears only a GPS warning, preserving publishing and other form messages.
-  if (statusSource === "gps") setStatus("");
+  clearStatus("gps", statusVersion);  // Leaves statusVersion, so a pending search can still show its error.
   if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
     updateSelection(latitude, longitude, true);
     if (selectLocation) {

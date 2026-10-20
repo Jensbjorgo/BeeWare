@@ -1074,3 +1074,20 @@ test("an older lookup that works does not clear a newer error, and clearing keep
   await settle();
   assert.match(status.textContent, /Linjesøket feilet/);
 });
+
+test("GPS working again does not hide a stop search error that comes later", async () => {
+  let answerSearch;
+  const app = await setup((url) => url.startsWith("/api/stops/search") ? new Promise((resolve) => { answerSearch = resolve; }) : undefined);
+  const status = app.element("#formStatus");
+  app.click();
+  app.currentFails();  // The GPS error shows ...
+  assert.ok(status.textContent);
+  const stop = app.element("#stopInput");
+  stop.value = "Sentrum";
+  const search = stop.input();  // ... a search hangs ...
+  app.watch(59.9, 10.7);  // ... GPS works again and clears its error ...
+  await settle();
+  answerSearch(reply({ error: "Holdeplassøket feilet." }, false));  // ... and the search then fails.
+  await search;
+  assert.match(status.textContent, /Holdeplassøket feilet/);
+});
