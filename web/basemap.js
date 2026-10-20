@@ -40,13 +40,23 @@ function createBasemap(map, status) {
     layer.addTo(map);
     const renderer = layer.getMaplibreMap();
     let failed = false;
+    let loaded = false;
     showStatus("Laster kart …");
     renderer.on("error", () => {
+      if (!loaded && map.hasLayer(layer)) {
+        // OpenFreeMap is unreachable before anything showed: use Kartverket's map instead.
+        map.removeLayer(layer);
+        rasterFallback();
+        return;
+      }
       failed = true;
       showStatus("Kartet kunne ikke lastes. Sjekk internettilgang og eventuell innholdsblokkering.");
     });
     renderer.on("sourcedata", (event) => {
       if (event.sourceDataType === "content" && event.isSourceLoaded) failed = false;
+    });
+    renderer.on("data", (event) => {
+      if (event.dataType === "source" && event.tile) loaded = true;
     });
     renderer.on("idle", () => {
       if (!failed) showStatus();

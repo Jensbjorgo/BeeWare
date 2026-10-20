@@ -137,6 +137,9 @@ function suggestionList(input, list, choose) {
   }
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      if (open && items.length) {
+        event.stopPropagation(); // Closes only the list; the next Escape closes the menu.
+      }
       open = false; // Also while a search is loading, so its answer does not open the list.
       render();
       return;

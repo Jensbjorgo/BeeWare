@@ -49,6 +49,7 @@ async function setup(route = () => undefined, { vectorSupport = true, vectorFail
   let watches = 0;
   let intervals = 0;
   let poll;
+  const rasterLayers = [];
   const timeouts = new Map();
   let elapsed = 0;
   const context = vm.createContext({
@@ -56,13 +57,15 @@ async function setup(route = () => undefined, { vectorSupport = true, vectorFail
     L: {
       map: () => ({
         on() {}, setView() {}, flyTo() {}, panTo() {}, invalidateSize() {},
+        hasLayer: (child) => !child.removed, removeLayer(child) { child.removed = true; },
         getCenter: () => ({ lat: 59.91, lng: 10.75 }), wrapLatLng: (point) => point,
       }),
       maplibreGL: (options) => {
         if (vectorFailure) throw new Error("WebGL initialization failed");
         return layer(null, options);
       },
-      tileLayer: layer, layerGroup: layer, marker: layer, circle: layer,
+      tileLayer: (url, options) => { rasterLayers.push(layer(url, options)); return rasterLayers.at(-1); },
+      layerGroup: layer, marker: layer, circle: layer,
       divIcon: (options) => options,
     },
     document: {
@@ -100,6 +103,7 @@ async function setup(route = () => undefined, { vectorSupport = true, vectorFail
     watchDenied: () => watchError({ code: 1, PERMISSION_DENIED: 1 }),
     intervals: () => intervals,
     poll: () => poll(),
+    rasterLayers,
     timeOut: () => [...timeouts.keys()].forEach((callback) => { timeouts.delete(callback); callback(); }),
     advanceTime: (milliseconds) => {
       elapsed += milliseconds;
@@ -258,7 +262,8 @@ test("a vector map error stays visible until fresh content loads successfully", 
   const app = await setup();
   const status = app.element("#mapStatus");
   assert.equal(app.tiles.options.style, "/map-style.json");
-  app.tiles.events.error();
+  app.tiles.events.data({ dataType: "source", tile: {} });  // The map has shown something ...
+  app.tiles.events.error();  // ... so a later error keeps it and says so.
   app.tiles.events.idle();
   assert.match(status.textContent, /Kartet kunne ikke lastes/);
   assert.equal(status.classList.hidden, false);
@@ -266,6 +271,30 @@ test("a vector map error stays visible until fresh content loads successfully", 
   app.tiles.events.idle();
   assert.equal(status.textContent, "");
   assert.equal(status.classList.hidden, true);
+});
+
+test("an unreachable vector map before any tile switches to Kartverket's map", async () => {
+  const app = await setup();
+  app.tiles.events.error();
+  assert.equal(app.tiles.removed, true);
+  assert.match(app.rasterLayers.at(-1).point, /cache\.kartverket\.no/);
+  assert.doesNotMatch(app.element("#mapStatus").textContent, /Kartet kunne ikke lastes/);
+});
+
+test("Escape closes an open suggestion list without closing the menu", async () => {
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? reply({ items: [{ id: "A", name: "Alfa", lat: 59.9, lon: 10.7 }, { id: "B", name: "Alfabet", lat: 59.9, lon: 10.7 }] })
+    : undefined);
+  const stop = app.element("#stopInput");
+  stop.value = "Alf";
+  await stop.input();
+  let bubbled = 0;
+  const escape = () => stop.keydown({ key: "Escape", preventDefault() {}, stopPropagation() { bubbled--; } });
+  bubbled++; escape();
+  assert.equal(bubbled, 0);  // The open list took this Escape.
+  assert.equal(app.element("#stopOptions").hidden, true);
+  bubbled++; escape();
+  assert.equal(bubbled, 1);  // With the list closed, Escape reaches the menu.
 });
 
 test("a renderer startup failure falls back without stopping GPS or reporting", async () => {
@@ -371,7 +400,7 @@ test("stops sharing a name get distinct suggestions, and the keyboard picks one"
   assert.match(list.innerHTML, />Skolen \(850 m\)<.*>Skolen \(391,5 km\)</s);
   assert.match(list.innerHTML, />Jernbanetorget \(T-bane, 120 m\)<.*>Jernbanetorget \(buss, foran Oslo S, 180 m\)</s);
   assert.equal(list.hidden, false);
-  const key = (name) => stop.keydown({ key: name, preventDefault() {} });
+  const key = (name) => stop.keydown({ key: name, preventDefault() {}, stopPropagation() {} });
   key("ArrowUp");
   assert.match(list.innerHTML, /aria-selected="true">Jernbanetorget \(buss/);  // Up from the field wraps to the last.
   key("ArrowDown");
@@ -565,7 +594,7 @@ test("old suggestions cannot be picked once the text changes, and closed lists s
     ? new Promise((resolve) => searches.push(resolve)) : undefined);
   const stop = app.element("#stopInput");
   const list = app.element("#stopOptions");
-  const key = (name) => stop.keydown({ key: name, preventDefault() {} });
+  const key = (name) => stop.keydown({ key: name, preventDefault() {}, stopPropagation() {} });
   stop.value = "Oslo S";
   const first = stop.input();
   searches[0](reply({ items: [{ id: "OSL", name: "Oslo S", lat: 59.91, lon: 10.75 }] }));
