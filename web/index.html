@@ -37,8 +37,8 @@
       </defs>
     </svg>
     <div class="shell">
-      <button id="menuBackdrop" class="menu-backdrop" type="button" aria-label="Lukk meny" hidden></button>
-      <aside class="panel" id="sidePanel" aria-label="Registrering og observasjoner">
+      <button id="menuBackdrop" class="menu-backdrop" type="button" aria-label="Lukk meny" aria-hidden="true" inert></button>
+      <aside class="panel" id="sidePanel" aria-label="Registrering og observasjoner" aria-hidden="true" inert>
         <div class="brand">
           <div class="brand-lockup">
             <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><use href="#bee-mark" /></svg>
@@ -97,7 +97,7 @@
           <button id="authToggle" class="icon-button auth-toggle" type="button" aria-label="Åpne profil" aria-expanded="false" aria-controls="authContent">
             <svg class="icon" aria-hidden="true"><use href="#i-user" /></svg>
           </button>
-          <div id="authContent" class="card hidden" hidden>
+          <div id="authContent" class="card" aria-hidden="true" inert>
             <div id="authForms">
               <form id="loginForm" class="auth-form">
                 <div class="form-field">

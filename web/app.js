@@ -56,16 +56,24 @@ const shell = document.querySelector(".shell");
 const wideLayout = typeof matchMedia === "function" ? matchMedia("(min-width: 1200px)") : null;
 let menuOpen = false;
 
+function setPanelOpen(panel, open) {
+  panel.classList.toggle("is-open", open);
+  panel.inert = !open;
+  panel.setAttribute("aria-hidden", String(!open));
+}
+
 function toggleMenu(open = !menuOpen) {
   menuOpen = open;
   shell.classList.toggle("menu-closed", !open);
-  sidePanel.classList.toggle("is-open", open);
-  menuBackdrop.hidden = !open;
   menuToggle.hidden = open;
+  if (!open && (sidePanel.contains?.(document.activeElement) || document.activeElement === menuBackdrop)) {
+    menuToggle.focus({ preventScroll: true });
+  }
+  setPanelOpen(sidePanel, open);
+  setPanelOpen(menuBackdrop, open);
   menuToggle.setAttribute("aria-expanded", String(open));
   menuToggle.setAttribute("aria-label", open ? "Lukk meny" : "Åpne meny");
   if (open) toggleAuth(false);
-  map.invalidateSize();
 }
 
 // On wide screens the sidebar starts open; narrower screens start with the map.
@@ -74,11 +82,11 @@ wideLayout?.addEventListener("change", (event) => toggleMenu(event.matches));
 
 menuToggle.addEventListener("click", () => {
   toggleMenu(true);
-  document.querySelector("#menuClose").focus();
+  document.querySelector("#menuClose").focus({ preventScroll: true });
 });
 document.querySelector("#menuClose").addEventListener("click", () => {
   toggleMenu(false);
-  menuToggle.focus();
+  menuToggle.focus({ preventScroll: true });
 });
 menuBackdrop.addEventListener("click", () => toggleMenu(false));
 // Keyboard dismissal also works when focus is inside either panel.
@@ -86,10 +94,10 @@ menuBackdrop.addEventListener("click", () => toggleMenu(false));
   if (event.key !== "Escape") return;
   if (panel === authContent && state.authOpen) {
     toggleAuth(false);
-    authToggle.focus();
+    authToggle.focus({ preventScroll: true });
   } else if (menuOpen) {
     toggleMenu(false);
-    menuToggle.focus();
+    menuToggle.focus({ preventScroll: true });
   }
 }));
 const userLevel = document.querySelector("#userLevel");
@@ -335,8 +343,8 @@ function markerAgeClass(isoString) {
 function toggleAuth(open = !state.authOpen) {
   if (open && menuOpen && !wideLayout?.matches) toggleMenu(false);
   state.authOpen = open;
-  authContent.hidden = !open;
-  authContent.classList.toggle("hidden", !open);
+  if (!open && authContent.contains?.(document.activeElement)) authToggle.focus({ preventScroll: true });
+  setPanelOpen(authContent, open);
   authToggle.setAttribute("aria-expanded", String(open));
   authToggle.setAttribute("aria-label", open ? "Lukk profil" : "Åpne profil");
 }
