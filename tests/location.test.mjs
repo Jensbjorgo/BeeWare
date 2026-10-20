@@ -1044,3 +1044,33 @@ test("a stop search that works again removes its earlier error, but not other me
   await stop.input();
   assert.ok(status.textContent);  // ... stays when the search works.
 });
+
+test("an older lookup that works does not clear a newer error, and clearing keeps later errors", async () => {
+  let answerNearby;
+  let answerRoutes;
+  let stopFails = true;
+  const app = await setup((url) => {
+    if (url.startsWith("/api/stops/nearby")) return new Promise((resolve) => { answerNearby = resolve; });
+    if (url.startsWith("/api/routes")) return new Promise((resolve) => { answerRoutes = resolve; });
+    if (url.startsWith("/api/stops/search")) {
+      return stopFails ? reply({ error: "Holdeplassøket feilet." }, false) : reply({ items: [{ id: "S", name: "Sentrum", lat: 59.9, lon: 10.7 }] });
+    }
+  });
+  const status = app.element("#formStatus");
+  const stop = app.element("#stopInput");
+  app.loadNearbyStop(59.9, 10.7, false);  // A map pick's lookup, still waiting ...
+  stop.value = "Sentrum";
+  await stop.input();
+  answerNearby(reply({ items: [{ id: "N", name: "Nord", distance_m: 5 }] }));  // ... works after the search failed.
+  await settle();
+  assert.match(status.textContent, /Holdeplassøket feilet/);
+  const route = app.element("#routeInput");
+  route.value = "3";
+  route.input();  // A line search starts ...
+  stopFails = false;
+  await stop.input();  // ... the stop search works and clears its error ...
+  assert.equal(status.textContent, "");
+  answerRoutes(reply({ error: "Linjesøket feilet." }, false));  // ... and the line search then fails.
+  await settle();
+  assert.match(status.textContent, /Linjesøket feilet/);
+});

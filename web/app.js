@@ -316,9 +316,14 @@ function setStatus(message, type = "", source = "") {
 
 // For answers that can arrive late, such as GPS or suggestions: the returned function shows a
 // message only if no newer one, such as a published report, was shown in the meantime.
-// A lookup that works again takes away the error it showed before, but no other message.
-function clearStatus(source) {
-  if (statusSource === source) setStatus("");
+// A lookup that works again takes away the error it showed before, but no message shown since
+// it started. Like hiding, this leaves statusVersion alone, so late errors from others still show.
+function clearStatus(source, since) {
+  if (statusSource === source && statusVersion === since) {
+    clearTimeout(statusTimer);
+    statusSource = "";
+    showStatus("");
+  }
 }
 
 function lateStatus(source = "") {
@@ -579,6 +584,7 @@ function clearStop() {
 
 async function loadNearbyStop(lat, lon, replaceStop = true) {
   const setNearbyStatus = lateStatus("stop");
+  const before = statusVersion;
   if (replaceStop) {
     clearStop(); // A newer position also outdates pending stop searches.
   }
@@ -587,7 +593,7 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
     if (!payload) {
       return;
     }
-    clearStatus("stop");
+    clearStatus("stop", before);
     const [closest] = payload.items;
     // Fill in the stop unless the user has started typing one meanwhile.
     if (closest && !stopInput.value) {
@@ -743,6 +749,7 @@ stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 
 async function searchStop() {
   const setStopStatus = lateStatus("stop");
+  const before = statusVersion;
   const query = stopInput.value.trim();
   userChoseManually();
   stopInput.dataset.stopId = "";
@@ -755,7 +762,7 @@ async function searchStop() {
     if (!payload) {
       return;
     }
-    clearStatus("stop");
+    clearStatus("stop", before);
     const choices = stopChoices(payload.items);
     stopSuggestions.show(choices);
     // A fully typed name, in any case, picks its stop when no other stop in the list shares it.
@@ -780,6 +787,7 @@ routeInput.addEventListener("input", () => {
 
 async function searchRoute() {
   const setRouteStatus = lateStatus("route");
+  const before = statusVersion;
   try {
     // Lines stopping near the report come first, so "3" by Gløshaugen is AtB's line 3.
     const center = map.wrapLatLng(map.getCenter());
@@ -787,7 +795,7 @@ async function searchRoute() {
     const query = encodeURIComponent(routeInput.value.trim());
     const payload = await fetchLatest("route", `/api/routes?q=${query}&lat=${lat}&lon=${lon}`);
     if (payload) {
-      clearStatus("route");
+      clearStatus("route", before);
       routeSuggestions.show(payload.items); // Each value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
     }
   } catch (error) {
