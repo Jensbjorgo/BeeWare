@@ -56,7 +56,8 @@ function createBasemap(map, status) {
       if (event.sourceDataType === "content" && event.isSourceLoaded) failed = false;
     });
     renderer.on("data", (event) => {
-      if (event.dataType === "source" && event.tile) loaded = true;
+      // A tile that loads after an error means the map works again; idle then hides the message.
+      if (event.dataType === "source" && event.tile) loaded = true, failed = false;
     });
     renderer.on("idle", () => {
       if (!failed) showStatus();

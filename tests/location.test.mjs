@@ -276,7 +276,7 @@ test("a vector map error stays visible until fresh content loads successfully", 
   app.tiles.events.idle();
   assert.match(status.textContent, /Kartet kunne ikke lastes/);
   assert.equal(status.classList.hidden, false);
-  app.tiles.events.sourcedata({ sourceDataType: "content", isSourceLoaded: true });
+  app.tiles.events.data({ dataType: "source", tile: {}, isSourceLoaded: true });  // As MapLibre sends a loaded tile.
   app.tiles.events.idle();
   assert.equal(status.textContent, "");
   assert.equal(status.classList.hidden, true);
@@ -1024,4 +1024,23 @@ test("the map centre button sets the report position, for keyboard users without
   const app = await setup();
   app.element("#centerBtn").click();
   assert.deepEqual([app.state.selectedLatLng.lat, app.state.selectedLatLng.lon], [59.91, 10.75]);
+});
+
+test("a stop search that works again removes its earlier error, but not other messages", async () => {
+  let fail = true;
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? (fail ? reply({ error: "Holdeplassøket feilet." }, false) : reply({ items: [{ id: "A", name: "Alfa", lat: 59.9, lon: 10.7 }] }))
+    : undefined);
+  const stop = app.element("#stopInput");
+  const status = app.element("#formStatus");
+  stop.value = "Alfa";
+  await stop.input();
+  assert.match(status.textContent, /Holdeplassøket feilet/);
+  fail = false;
+  await stop.input();
+  assert.doesNotMatch(status.textContent, /feilet/);
+  assert.equal(stop.dataset.stopId, "A");
+  await app.element("#reportForm").submit({ preventDefault() {} });  // Another message ...
+  await stop.input();
+  assert.ok(status.textContent);  // ... stays when the search works.
 });
