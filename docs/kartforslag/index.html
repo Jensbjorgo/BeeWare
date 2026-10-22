@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BeeWare kartforslag</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+<style>
+:root {
+  --bee: #f2c230; --guard: #3b6fd8; --unsafe: #d6453d;
+  --surface: #fffefa; --ink: #1f2620; --muted: #687064; --soft: #ecede6;
+  --shadow: 0 8px 28px rgb(20 25 20 / 14%), 0 2px 6px rgb(20 25 20 / 6%);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+body[data-variant="B"] { --surface: #1c2128; --ink: #eef1f4; --muted: #9ba5af; --soft: #2c343e; }
+html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink); }
+button { font: inherit; color: inherit; cursor: pointer; }
+#map { position: fixed; inset: 0; }
+
+.top { position: fixed; inset: 0 0 auto; z-index: 2; display: grid; gap: 8px; padding: 12px 16px 0; pointer-events: none; }
+.top > * { pointer-events: auto; }
+.bar { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.brand { background: var(--surface); border-radius: 999px; padding: 8px 14px; font-weight: 800; box-shadow: var(--shadow); }
+.brand span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--bee); margin-right: 6px; }
+.variants { display: flex; background: var(--surface); border-radius: 999px; padding: 4px; box-shadow: var(--shadow); }
+.variants button { border: 0; background: none; border-radius: 999px; padding: 6px 12px; font-weight: 700; color: var(--muted); }
+.variants button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.about { justify-self: end; max-width: 330px; background: var(--surface); border-radius: 12px; padding: 8px 12px; font-size: 13px; color: var(--muted); box-shadow: var(--shadow); }
+.about b { color: var(--ink); }
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 8px; scrollbar-width: none; }
+.chip { flex: none; display: inline-flex; align-items: center; gap: 4px; background: var(--surface); border: 1px solid var(--soft); border-radius: 999px; padding: 4px 4px 4px 12px; font-size: 14px; box-shadow: var(--shadow); }
+.chip > button { border: 0; background: none; padding: 4px 2px; }
+.chip small { color: var(--muted); margin-left: 4px; }
+.chip .bell { width: 30px; height: 30px; border-radius: 50%; background: var(--soft); font-size: 14px; filter: grayscale(1); }
+.chip .bell[aria-pressed="true"] { background: var(--bee); filter: none; }
+.chip .x { color: var(--muted); width: 26px; }
+.chip.add { padding: 8px 14px; border-style: dashed; font-weight: 600; }
+
+.sheet { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; max-height: 48vh; overflow: auto; background: var(--surface); border-radius: 20px 20px 0 0; box-shadow: var(--shadow); padding: 8px 16px calc(16px + env(safe-area-inset-bottom)); }
+@media (min-width: 768px) {
+  .sheet { left: 16px; right: auto; top: 128px; bottom: auto; width: 380px; border-radius: 20px; max-height: calc(100vh - 144px); }
+  .about { position: absolute; right: 16px; top: 64px; }
+  .chips { padding-right: 360px; }
+}
+.handle { width: 40px; height: 4px; border-radius: 2px; background: var(--soft); margin: 0 auto 10px; }
+.sheet h2 { margin: 0; font-size: 20px; }
+.sheet h3 { margin: 16px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.head { display: flex; gap: 8px; align-items: start; justify-content: space-between; }
+.sub { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
+.pill { display: inline-block; background: var(--soft); border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 700; margin-left: 6px; }
+.close, .watch { border: 1px solid var(--soft); background: var(--surface); border-radius: 999px; padding: 6px 12px; font-size: 14px; white-space: nowrap; }
+.watch[aria-pressed="true"] { background: var(--bee); color: #1f2620; border-color: var(--bee); }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 26px; padding: 0 6px; border: 0; border-radius: 6px; font-weight: 800; font-size: 13px; }
+.badge[aria-pressed="true"] { outline: 3px solid var(--ink); outline-offset: 1px; }
+.row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--soft); font-size: 15px; }
+.row:first-of-type { border-top: 0; }
+.row small { display: block; color: var(--muted); font-size: 13px; }
+.mins { font-weight: 800; font-variant-numeric: tabular-nums; }
+.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #2fa36b; margin-right: 6px; vertical-align: 1px; }
+.last { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; padding: 10px; border-radius: 14px; background: var(--soft); font-size: 15px; }
+.last small { display: block; color: var(--muted); }
+.primary { display: block; width: 100%; margin-top: 16px; border: 0; border-radius: 14px; padding: 13px; background: var(--bee); color: #1f2620; font-weight: 800; }
+.hint { color: var(--muted); font-size: 14px; margin: 6px 0; }
+.demo { font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--soft); border-radius: 6px; padding: 1px 5px; margin-left: 6px; vertical-align: 2px; }
+
+.sighting { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 900; font-size: 14px; border: 2px solid #fff; box-shadow: 0 2px 8px rgb(0 0 0 / 30%); position: relative; }
+.sighting.k { background: var(--bee); color: #1f2620; }
+.sighting.v { background: var(--guard); color: #fff; }
+.sighting.u { background: var(--unsafe); color: #fff; }
+.sighting.fresh::after { content: ""; position: absolute; inset: -8px; border-radius: 50%; border: 3px solid currentColor; opacity: 0; animation: pulse 2s infinite; }
+.sighting.k.fresh::after { border-color: var(--bee); }
+.sighting.old { opacity: .55; }
+body[data-variant="B"] .sighting { border-color: #1c2128; box-shadow: 0 0 18px 4px rgb(242 194 48 / 45%); }
+@keyframes pulse { from { transform: scale(.7); opacity: .9; } to { transform: scale(1.6); opacity: 0; } }
+
+dialog { border: 0; border-radius: 20px; padding: 16px; width: min(420px, calc(100vw - 32px)); max-height: 80vh; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+dialog::backdrop { background: rgb(20 25 20 / 35%); }
+dialog h3 { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+dialog .options { display: flex; flex-wrap: wrap; gap: 6px; }
+dialog .options button { border: 1px solid var(--soft); background: var(--surface); border-radius: 999px; padding: 6px 12px; }
+dialog .options button[aria-pressed="true"] { background: var(--bee); border-color: var(--bee); color: #1f2620; }
+.maplibregl-ctrl-attrib { font-size: 11px; }
+body.scene .about { font-size: 15px; max-width: 400px; padding: 12px 16px; color: var(--ink); }
+body.scene .about b { display: block; font-size: 20px; margin-bottom: 2px; }
+@media (min-width: 768px) { body.scene .about { position: fixed; top: auto; bottom: 40px; right: 64px; } }
+@media (max-width: 767px) { body.scene .about { font-size: 13px; padding: 8px 12px; } body.scene .about b { font-size: 16px; } }
+dialog:not(:modal)[open] { position: fixed; inset: 0; margin: auto; height: fit-content; z-index: 5; }
+.note-ring { position: fixed; z-index: 20; border: 3px solid #ff2e93; border-radius: 14px; box-shadow: 0 0 0 3px rgb(255 255 255 / 85%); pointer-events: none; }
+.note-ring.round { border-radius: 50%; }
+.note-ring b, .note-label b { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; font-size: 14px; }
+.note-ring b { position: absolute; left: -14px; top: -14px; background: #ff2e93; color: #fff; box-shadow: 0 0 0 2px #fff; }
+.note-label { position: fixed; z-index: 21; display: flex; align-items: center; gap: 8px; padding: 5px 14px 5px 5px; border-radius: 999px; background: #ff2e93; color: #fff; font-weight: 700; font-size: 15px; white-space: nowrap; box-shadow: 0 4px 14px rgb(0 0 0 / 25%); pointer-events: none; }
+.note-label b { background: #fff; color: #ff2e93; }
+.note-line { position: fixed; z-index: 19; height: 3px; background: #ff2e93; pointer-events: none; }
+</style>
+</head>
+<body data-variant="A">
+<div id="map"></div>
+
+<div class="top">
+  <div class="bar">
+    <div class="brand"><span></span>BeeWare</div>
+    <div class="variants" role="group" aria-label="Forslag">
+      <button type="button" data-v="A">A</button><button type="button" data-v="B">B</button><button type="button" data-v="C">C</button><button type="button" data-v="D">D</button>
+    </div>
+  </div>
+  <p class="about" id="about"></p>
+  <div class="chips" id="chips"></div>
+</div>
+
+<section class="sheet" id="sheet" aria-live="polite"></section>
+
+<dialog id="picker">
+  <div class="head"><h2>Velg områder</h2><button class="close" type="button" onclick="this.closest('dialog').close()">Ferdig</button></div>
+  <p class="sub">Kombiner soner og kommuner. Bjella slår på varsler.</p>
+  <div id="pickerBody"></div>
+</dialog>
+
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script>
+const ENTUR = "https://api.entur.io";
+const CLIENT = { "ET-Client-Name": "po-beeware-prototype" };
+const OFM = "https://tiles.openfreemap.org/styles/";
+const VARIANTS = {
+  A: { style: "positron", name: "Lys og rolig", text: "Grått bakgrunnskart. Farge bare på linjer, stopp og meldinger." },
+  B: { style: "dark", name: "Natt", text: "Mørkt kart som ikke blender om kvelden. Meldingene lyser." },
+  C: { style: "positron", name: "Linjekart", text: "Bakgrunnen tones ned. Linjene blir tykke med nummer langs traseen." },
+  D: { style: "positron", name: "Soner", text: "Takstsonene vises, og alt utenfor områdene dine blir dimmet." },
+};
+const TYPES = { k: "Kontrollør", v: "Vekter", u: "Ubehagelig situasjon" };
+const MODE_COLOUR = { bus: "#e60000", tram: "#0b91ef", metro: "#ec700c" };
+const MODE_NAME = { bus: "buss", tram: "trikk", metro: "T-bane", rail: "tog", water: "båt", coach: "ekspressbuss" };
+const KOMMUNER = { "0301": "Oslo", "3201": "Bærum", "3203": "Asker", "3205": "Lillestrøm", "3207": "Nordre Follo", "5001": "Trondheim", "4601": "Bergen", "1103": "Stavanger" };
+
+// Example reports: the server only keeps reports for three hours and has none right now.
+const now = Date.now();
+const SIGHTINGS = [
+  { type: "k", lat: 59.91225, lon: 10.75137, stop: "Jernbanetorget", note: "To kontrollører ved trappene ned til T-banen", ago: 12 },
+  { type: "v", lat: 59.91474, lon: 10.73157, stop: "Nationaltheatret", note: "Vektere ved inngangen", ago: 47 },
+  { type: "u", lat: 59.91280, lon: 10.76040, stop: "Grønland", note: "Urolig person på perrongen", ago: 95 },
+  { type: "k", lat: 59.91740, lon: 10.73840, stop: "Tullinløkka", note: "Sivile, går på bak på 37", ago: 150 },
+  { type: "k", lat: 63.43050, lon: 10.39500, stop: "Kongens gate", note: "Kontroll på K1", ago: 8 },
+  { type: "v", lat: 63.41830, lon: 10.40360, stop: "Gløshaugen", note: "Vekter i leskuret", ago: 55 },
+  { type: "k", lat: 63.42230, lon: 10.39530, stop: "Studentersamfundet", note: "", ago: 130 },
+].map((s) => ({ ...s, at: now - s.ago * 60000 }));
+
+const state = {
+  variant: "A",
+  areas: ["RUT:FareZone:4", "kommune:3203", "ATB:FareZone:10"],
+  bells: new Set(["RUT:FareZone:4"]),
+  watchedStops: new Map(), // id -> name
+  zones: [], // fare zones with polygons, from Entur's stop register
+  kommuner: new Map(), // nr -> GeoJSON geometry
+  stops: [],
+  lines: new Map(), // id -> decoded journey patterns
+  lineInfo: new Map(), // id -> number, mode and colours
+  linesInView: [],
+  pickedLine: null,
+  stop: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const ago = (at) => { const m = Math.round((Date.now() - at) / 60000); return m < 60 ? `${m} min siden` : `${Math.floor(m / 60)} t ${m % 60} min siden`; };
+const metres = (a, b) => {
+  const k = Math.PI / 180, x = (b.lon - a.lon) * k * Math.cos(((a.lat + b.lat) / 2) * k), y = (b.lat - a.lat) * k;
+  return Math.round(Math.hypot(x, y) * 6371000);
+};
+const far = (m) => (m < 1000 ? `${m} m unna` : `${(m / 1000).toFixed(1).replace(".", ",")} km unna`);
+const colour = (line) => (line.presentation?.colour ? `#${line.presentation.colour}` : MODE_COLOUR[line.transportMode] || "#5d6a5a");
+const textColour = (line) => (line.presentation?.textColour ? `#${line.presentation.textColour}` : "#fff");
+const badge = (line, pressable) =>
+  `<${pressable ? `button type="button" data-line="${esc(line.id)}" aria-pressed="${state.pickedLine === line.id}"` : "span"} class="badge" style="background:${colour(line)};color:${textColour(line)}">${esc(line.publicCode)}</${pressable ? "button" : "span"}>`;
+
+async function graphql(query) {
+  const response = await fetch(`${ENTUR}/journey-planner/v3/graphql`, {
+    method: "POST", headers: { ...CLIENT, "Content-Type": "application/json" }, body: JSON.stringify({ query }),
+  });
+  return (await response.json()).data;
+}
+
+const MODE_ORDER = { metro: 0, tram: 1, bus: 2 };
+const byLine = (a, b) => MODE_ORDER[a.transportMode] - MODE_ORDER[b.transportMode] || a.publicCode.localeCompare(b.publicCode, "no", { numeric: true });
+
+// Google polyline, five decimals, as Entur returns it.
+function decode(text) {
+  const points = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < text.length) {
+    const deltas = [0, 0];
+    for (const k of [0, 1]) {
+      let shift = 0, result = 0, byte;
+      do { byte = text.charCodeAt(i++) - 63; result |= (byte & 31) << shift; shift += 5; } while (byte >= 32);
+      deltas[k] = result & 1 ? ~(result >> 1) : result >> 1;
+    }
+    lat += deltas[0]; lon += deltas[1];
+    points.push([lon / 1e5, lat / 1e5]);
+  }
+  return points;
+}
+
+// ---------- Areas ----------
+async function loadZones() {
+  const lists = await Promise.all(["RUT:Authority:RUT", "ATB:Authority:2"].map((ref) =>
+    fetch(`${ENTUR}/stop-places/v1/read/fare-zones?authorityRefs=${ref}&count=100`, { headers: CLIENT }).then((r) => r.json())));
+  state.zones = lists.flat().filter((zone) => zone.polygon && !/skole/i.test(zone.name.value)).map((zone) => {
+    const flat = zone.polygon.exterior.abstractRing.value.posList.value;
+    const ring = [];
+    for (let i = 0; i < flat.length; i += 2) ring.push([flat[i + 1], flat[i]]);
+    return { id: zone.id, name: zone.name.value, owner: zone.id.startsWith("RUT") ? "Ruter" : "AtB", ring };
+  });
+}
+
+async function areaGeometry(id) {
+  if (!id.startsWith("kommune:")) {
+    const zone = state.zones.find((z) => z.id === id);
+    return zone && { type: "Polygon", coordinates: [zone.ring] };
+  }
+  const nr = id.slice(8);
+  if (!state.kommuner.has(nr)) {
+    const data = await fetch(`https://ws.geonorge.no/kommuneinfo/v1/kommuner/${nr}/omrade?utkoordsys=4326`).then((r) => r.json());
+    state.kommuner.set(nr, { type: "MultiPolygon", coordinates: data.omrade.coordinates });
+  }
+  return state.kommuner.get(nr);
+}
+
+function areaLabel(id) {
+  if (id.startsWith("kommune:")) return { label: KOMMUNER[id.slice(8)], sub: "kommune" };
+  const zone = state.zones.find((z) => z.id === id);
+  return { label: `Sone ${zone?.name ?? "…"}`, sub: zone?.owner === "AtB" ? "AtB" : "Ruter" };
+}
+
+function renderChips() {
+  const areaChips = state.areas.map((id) => {
+    const { label, sub } = areaLabel(id);
+    return `<span class="chip"><button type="button" data-fly="${id}">${esc(label)}<small>${sub}</small></button>
+      <button type="button" class="bell" data-bell="${id}" aria-pressed="${state.bells.has(id)}" aria-label="Varsler for ${esc(label)}">🔔</button>
+      <button type="button" class="x" data-remove="${id}" aria-label="Fjern ${esc(label)}">✕</button></span>`;
+  });
+  const stopChips = [...state.watchedStops].map(([id, name]) =>
+    `<span class="chip"><button type="button" data-stop="${id}">★ ${esc(name)}</button>
+      <button type="button" class="bell" data-unwatch="${id}" aria-pressed="true" aria-label="Slå av varsler for ${esc(name)}">🔔</button></span>`);
+  $("chips").innerHTML = [...areaChips, ...stopChips, `<button type="button" class="chip add" id="addArea">+ Område</button>`].join("");
+}
+
+function renderPicker() {
+  const option = (id, label) => `<button type="button" data-toggle="${id}" aria-pressed="${state.areas.includes(id)}">${esc(label)}</button>`;
+  const zones = (owner) => state.zones.filter((z) => z.owner === owner).sort((a, b) => a.name.localeCompare(b.name, "no", { numeric: true }))
+    .map((z) => option(z.id, `Sone ${z.name}`)).join("");
+  $("pickerBody").innerHTML = `<h3>Ruter-soner (Oslo og Akershus)</h3><div class="options">${zones("Ruter")}</div>
+    <h3>AtB-soner (Trøndelag)</h3><div class="options">${zones("AtB")}</div>
+    <h3>Kommuner</h3><div class="options">${Object.entries(KOMMUNER).sort((a, b) => a[1].localeCompare(b[1], "no")).map(([nr, name]) => option(`kommune:${nr}`, name)).join("")}</div>`;
+}
+
+async function updateAreas() {
+  renderChips();
+  const shapes = (await Promise.all(state.areas.map(areaGeometry))).filter(Boolean);
+  const source = map.getSource("areas");
+  if (!source) return;
+  source.setData({ type: "FeatureCollection", features: shapes.map((geometry) => ({ type: "Feature", geometry, properties: {} })) });
+  const holes = shapes.flatMap((g) => (g.type === "Polygon" ? [g.coordinates[0]] : g.coordinates.map((p) => p[0])));
+  map.getSource("mask").setData({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]], ...holes] } });
+}
+
+async function flyToArea(id) {
+  const geometry = await areaGeometry(id);
+  const points = geometry.type === "Polygon" ? geometry.coordinates[0] : geometry.coordinates.flatMap((p) => p[0]);
+  const bounds = points.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(points[0], points[0]));
+  map.fitBounds(bounds, { padding: { top: 150, bottom: 260, left: 40, right: 40 }, maxZoom: 14 });
+}
+
+// ---------- Stops and lines in view ----------
+async function loadView() {
+  if (map.getZoom() < 12) {
+    state.stops = []; state.linesInView = [];
+    draw(); renderSheet();
+    return;
+  }
+  const c = map.getCenter(), b = map.getBounds();
+  // At least about 450 m around the middle, at most about 1.3 km, so a narrow phone still finds stops.
+  const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+  const dLat = clamp((b.getNorth() - b.getSouth()) / 2, 0.004, 0.012), dLon = clamp((b.getEast() - b.getWest()) / 2, 0.008, 0.025);
+  const data = await graphql(`{ stopPlacesByBbox(minimumLatitude:${c.lat - dLat}, maximumLatitude:${c.lat + dLat}, minimumLongitude:${c.lng - dLon}, maximumLongitude:${c.lng + dLon}) {
+    id name latitude longitude transportMode quays { lines { id publicCode transportMode presentation { colour textColour } } } } }`);
+  const lines = new Map();
+  const hour = new Date().getHours(), night = hour < 5 || hour >= 23; // ponytail: night lines ("1N") by clock, not by timetable
+  state.stops = data.stopPlacesByBbox.map((stop) => {
+    const here = new Map();
+    for (const quay of stop.quays) for (const line of quay.lines) {
+      if (["bus", "tram", "metro"].includes(line.transportMode) && line.publicCode && (night || !/\dN$/.test(line.publicCode))) here.set(line.id, line);
+    }
+    here.forEach((line, id) => { lines.set(id, line); state.lineInfo.set(id, line); });
+    return { ...stop, lines: [...here.values()] };
+  }).filter((stop) => stop.lines.length);
+  state.stops.forEach((stop) => stop.lines.sort(byLine));
+  state.linesInView = [...lines.values()].sort(byLine).slice(0, 80);
+  const missing = state.linesInView.filter((line) => !state.lines.has(line.id)).map((line) => line.id);
+  for (let i = 0; i < missing.length; i += 25) {
+    const ids = missing.slice(i, i + 25).map((id) => JSON.stringify(id)).join(",");
+    const result = await graphql(`{ lines(ids:[${ids}]) { id journeyPatterns { pointsOnLink { points } } } }`);
+    for (const line of result.lines) {
+      const shapes = [...new Set(line.journeyPatterns.map((p) => p.pointsOnLink?.points).filter(Boolean))].slice(0, 4);
+      state.lines.set(line.id, shapes.map(decode));
+    }
+  }
+  draw(); renderSheet();
+}
+
+function draw() {
+  if (!map.getSource("stops")) return;
+  map.getSource("stops").setData({ type: "FeatureCollection", features: state.stops.map((stop) => ({
+    type: "Feature", geometry: { type: "Point", coordinates: [stop.longitude, stop.latitude] },
+    properties: { id: stop.id, name: stop.name },
+  })) });
+  // A picked line stays on the map after it leaves the view.
+  const shown = state.linesInView.some((l) => l.id === state.pickedLine) || !state.pickedLine ? state.linesInView : [...state.linesInView, state.lineInfo.get(state.pickedLine)].filter(Boolean);
+  map.getSource("lines").setData({ type: "FeatureCollection", features: shown.filter((line) => state.lines.get(line.id)?.length).map((line) => ({
+    type: "Feature", geometry: { type: "MultiLineString", coordinates: state.lines.get(line.id) },
+    properties: { id: line.id, code: line.publicCode, colour: colour(line), rank: line.transportMode === "bus" ? 0 : 1 },
+  })) });
+  highlight();
+}
+
+function highlight() {
+  if (!map.getLayer("lines")) return;
+  const picked = state.pickedLine;
+  const base = state.variant === "C" ? 5 : state.variant === "D" ? 2 : 3;
+  map.setPaintProperty("lines", "line-opacity", picked ? ["case", ["==", ["get", "id"], picked], 1, 0.12] : state.variant === "D" ? 0.55 : 0.85);
+  map.setPaintProperty("lines", "line-width", picked ? ["case", ["==", ["get", "id"], picked], base + 3, base] : base);
+  if (map.getLayer("lines-casing")) {
+    map.setFilter("lines-casing", picked ? ["==", ["get", "id"], picked] : null);
+    map.setFilter("line-labels", picked ? ["==", ["get", "id"], picked] : null);
+    map.setPaintProperty("lines-casing", "line-width", picked ? base + 7 : base + 4);
+  }
+  map.setFilter("stop-picked", ["==", ["get", "id"], state.stop?.id ?? ""]);
+}
+
+// ---------- Map style per proposal ----------
+function addOverlays() {
+  const v = state.variant;
+  const empty = { type: "FeatureCollection", features: [] };
+  if (v === "C") {
+    // Tone the base map down so the lines carry the picture.
+    for (const layer of map.getStyle().layers) {
+      if (layer.type === "fill") map.setPaintProperty(layer.id, "fill-opacity", 0.45);
+      if (layer.type === "line") map.setPaintProperty(layer.id, "line-opacity", 0.3);
+      if (layer.type === "symbol") map.setPaintProperty(layer.id, "text-opacity", 0.5);
+    }
+  }
+  map.addSource("mask", { type: "geojson", data: empty });
+  map.addSource("areas", { type: "geojson", data: empty });
+  map.addSource("zones", { type: "geojson", data: empty });
+  map.addSource("zone-labels", { type: "geojson", data: empty });
+  map.addSource("lines", { type: "geojson", data: empty });
+  map.addSource("stops", { type: "geojson", data: empty });
+  if (v === "D") {
+    map.addLayer({ id: "zones-fill", type: "fill", source: "zones", paint: { "fill-color": ["get", "fill"], "fill-opacity": 0.16 } });
+    map.addLayer({ id: "zones-line", type: "line", source: "zones", paint: { "line-color": "#55604f", "line-width": 1.2, "line-dasharray": [3, 2] } });
+    map.addLayer({ id: "mask", type: "fill", source: "mask", paint: { "fill-color": "#1f2620", "fill-opacity": 0.3 } });
+    map.addLayer({ id: "zone-labels", type: "symbol", source: "zone-labels", layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Bold"], "text-size": 22 }, paint: { "text-color": "#3b4636", "text-halo-color": "#fff", "text-halo-width": 2 } });
+  } else {
+    map.addLayer({ id: "areas-fill", type: "fill", source: "areas", paint: { "fill-color": "#f2c230", "fill-opacity": v === "B" ? 0.06 : 0.08 } });
+  }
+  map.addLayer({ id: "areas-line", type: "line", source: "areas", paint: { "line-color": "#e0a800", "line-width": 3, "line-opacity": 0.9 } });
+  if (v === "C") map.addLayer({ id: "lines-casing", type: "line", source: "lines", minzoom: 12, layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#fff", "line-width": 9 } });
+  map.addLayer({ id: "lines", type: "line", source: "lines", minzoom: 12, layout: { "line-cap": "round", "line-join": "round", "line-sort-key": ["get", "rank"] }, paint: { "line-color": ["get", "colour"] } });
+  if (v === "C") map.addLayer({ id: "line-labels", type: "symbol", source: "lines", minzoom: 13, layout: { "symbol-placement": "line", "symbol-spacing": 220, "text-field": ["get", "code"], "text-font": ["Noto Sans Bold"], "text-size": 12 }, paint: { "text-color": "#fff", "text-halo-color": ["get", "colour"], "text-halo-width": 3 } });
+  const dark = v === "B";
+  map.addLayer({ id: "stops", type: "circle", source: "stops", minzoom: 13, paint: {
+    "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2.5, 16, 6],
+    "circle-color": dark ? "#1c2128" : "#fff", "circle-stroke-color": dark ? "#e9edf1" : "#2c352a", "circle-stroke-width": 1.5 } });
+  map.addLayer({ id: "stop-picked", type: "circle", source: "stops", filter: ["==", ["get", "id"], ""], paint: { "circle-radius": 10, "circle-color": "#f2c230", "circle-stroke-color": "#1f2620", "circle-stroke-width": 3 } });
+  map.addLayer({ id: "stop-labels", type: "symbol", source: "stops", minzoom: 15.5, layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-offset": [0, 1.1], "text-anchor": "top", "text-optional": true }, paint: { "text-color": dark ? "#e9edf1" : "#2c352a", "text-halo-color": dark ? "#1c2128" : "#fff", "text-halo-width": 1.5 } });
+  if (v === "D") fillZones();
+  updateAreas();
+  draw();
+}
+
+// The average corner is close enough to the middle for a label.
+const middle = (ring) => ring.reduce(([x, y], p) => [x + p[0] / ring.length, y + p[1] / ring.length], [0, 0]);
+
+function fillZones() {
+  const tints = ["#f2c230", "#3b6fd8", "#2fa36b", "#d6453d", "#8e5bd6"];
+  map.getSource("zones").setData({ type: "FeatureCollection", features: state.zones.map((z, i) => ({ type: "Feature", geometry: { type: "Polygon", coordinates: [z.ring] }, properties: { fill: tints[i % tints.length] } })) });
+  map.getSource("zone-labels").setData({ type: "FeatureCollection", features: state.zones.map((z) => (
+    { type: "Feature", geometry: { type: "Point", coordinates: middle(z.ring) }, properties: { name: z.name } }
+  )) });
+}
+
+function setVariant(v, restyle = true) {
+  state.variant = v;
+  document.body.dataset.variant = v;
+  document.querySelectorAll(".variants button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.v === v));
+  $("about").innerHTML = `<b>${v} · ${VARIANTS[v].name}.</b> ${VARIANTS[v].text}`;
+  if (restyle) map.setStyle(OFM + VARIANTS[v].style, { diff: false });
+}
+
+// ---------- Sheet ----------
+function sightingRow(s, from) {
+  return `<div class="row"><span class="sighting ${s.type}">${s.type === "u" ? "!" : s.type.toUpperCase()}</span>
+    <span>${TYPES[s.type]} · ${esc(s.stop)}<small>${ago(s.at)}${from ? ` · ${far(metres(from, s))}` : ""}${s.note ? ` · ${esc(s.note)}` : ""}</small></span><span></span></div>`;
+}
+
+function renderSheet() {
+  if (state.stop) return;
+  const c = map.getCenter(), here = { lat: c.lat, lon: c.lng };
+  const near = SIGHTINGS.filter((s) => metres(here, s) < 5000).sort((a, b) => b.at - a.at);
+  $("sheet").innerHTML = `<div class="handle"></div>
+    <div class="head"><div><h2>I området nå<span class="demo">eksempeldata</span></h2><p class="sub">Siste 3 timer, nærmest kartets midtpunkt</p></div></div>
+    <div id="nearList">${near.length ? near.map((s) => sightingRow(s, here)).join("") : `<p class="hint">Ingen meldinger her de siste 3 timene.</p>`}</div>
+    <h3>Linjer i kartutsnittet (${state.linesInView.length})</h3>
+    ${state.linesInView.length ? `<div class="badges" id="viewLines">${state.linesInView.map((l) => badge(l, true)).join("")}</div><p class="hint">Trykk på en linje for å se hele traseen.</p>` : `<p class="hint">Zoom inn for å se stopp og linjer.</p>`}
+    <button class="primary" type="button" onclick="alert('Her åpnes rapportskjemaet, som i dag.')">Meld fra her</button>`;
+}
+
+async function openStop(id) {
+  const stop = state.stops.find((s) => s.id === id);
+  if (!stop) return;
+  state.stop = { id, name: stop.name, at: [stop.longitude, stop.latitude] };
+  highlight();
+  map.easeTo({ center: [stop.longitude, stop.latitude] });
+  const there = { lat: stop.latitude, lon: stop.longitude };
+  const nearest = SIGHTINGS.map((s) => ({ s, m: metres(there, s) })).filter((x) => x.m < 1500).sort((a, b) => b.s.at - a.s.at)[0];
+  const head = (zones, deps) => `<div class="handle"></div>
+    <div class="head"><div><h2>${esc(stop.name)}${zones}</h2><p class="sub">${stop.transportMode.map((m) => MODE_NAME[m] || m).join(", ")}</p></div>
+      <div><button class="watch" type="button" data-watch="${id}" aria-pressed="${state.watchedStops.has(id)}">🔔 Varsle meg</button> <button class="close" type="button" data-closestop aria-label="Lukk">✕</button></div></div>
+    <h3>Sist sett i nærheten <span class="demo">eksempeldata</span></h3>
+    ${nearest ? `<div class="last"><span class="sighting ${nearest.s.type}">${nearest.s.type === "u" ? "!" : nearest.s.type.toUpperCase()}</span>
+      <span><b>${TYPES[nearest.s.type]}</b> ved ${esc(nearest.s.stop)}<small>${ago(nearest.s.at)} · ${nearest.m < 60 ? "på denne holdeplassen" : far(nearest.m)}</small></span></div>`
+      : `<p class="hint">Ingen meldinger innen 1,5 km de siste 3 timene.</p>`}
+    <h3>Neste avganger <span class="demo" style="color:#2fa36b">sanntid fra Entur</span></h3><div id="deps">${deps}</div>
+    <h3>Linjer her</h3><div class="badges">${stop.lines.map((l) => badge(l, true)).join("")}</div>`;
+  $("sheet").innerHTML = head("", `<p class="hint">Henter avganger …</p>`);
+  const data = await graphql(`{ stopPlace(id:"${id}") { tariffZones { id name } estimatedCalls(numberOfDepartures: 8, timeRange: 7200) {
+    expectedDepartureTime realtime cancellation destinationDisplay { frontText } serviceJourney { line { id publicCode transportMode presentation { colour textColour } } } } } }`);
+  if (state.stop?.id !== id) return;
+  const zones = [...new Set((data.stopPlace?.tariffZones ?? []).filter((z) => /^(RUT|ATB):/.test(z.id)).map((z) => z.name))].map((n) => `<span class="pill">Sone ${esc(n)}</span>`).join("");
+  const deps = (data.stopPlace?.estimatedCalls ?? []).map((call) => {
+    const at = new Date(call.expectedDepartureTime), m = Math.round((at - Date.now()) / 60000);
+    const when = call.cancellation ? "Innstilt" : m <= 0 ? "Nå" : m < 15 ? `${m} min` : at.toLocaleTimeString("no", { hour: "2-digit", minute: "2-digit" });
+    return `<div class="row">${badge(call.serviceJourney.line)}<span>${esc(call.destinationDisplay.frontText)}</span><span class="mins ${call.realtime ? "live" : ""}">${when}</span></div>`;
+  }).join("") || `<p class="hint">Ingen avganger de neste to timene.</p>`;
+  $("sheet").innerHTML = head(zones, deps);
+}
+
+function closeStop() { state.stop = null; highlight(); renderSheet(); }
+
+// ---------- Marked-up screenshots: ?scene=A, B, C, D, omrader or mobil (the images in bilder/) ----------
+const JERNBANETORGET_K = [10.75137, 59.91225];
+const SCENES = {
+  A: { v: "A", at: [10.7505, 59.9127, 14.6], stop: "NSR:StopPlace:58366", notes: [
+    { text: "Områdene dine – bjella slår på varsler", at: "#chips > *" },
+    { text: "Holdeplassen du trykket på", at: "stop" },
+    { text: "Varsle meg om akkurat dette stoppet", at: ".watch", side: "out" },
+    { text: "Sist sett i nærheten", at: ".last", side: "out" },
+    { text: "Neste avganger, i sanntid fra Entur", at: "#deps", side: "out" },
+  ] },
+  B: { v: "B", at: [10.7505, 59.9127, 14.6], notes: [
+    { text: "Siste meldinger rundt deg", at: "#nearList", side: "out" },
+    { text: "Alle linjer i kartutsnittet – trykk for å se traseen", at: "#viewLines", side: "out" },
+    { text: "Meldingene lyser på det mørke kartet", at: JERNBANETORGET_K },
+    { text: "Bytt mellom forslag A–D", at: ".variants", side: "left" },
+  ] },
+  C: { v: "C", at: [10.7505, 59.9127, 13.3], line: "RUT:Line:31", notes: [
+    { text: "Linje 31 er valgt", at: '#viewLines [data-line="RUT:Line:31"]', side: "out" },
+    { text: "Hele traseen, med linjenummer langs streken", at: { line: "RUT:Line:31", near: [0.82, 0.3] }, side: "left" },
+    { text: "De andre linjene tones ned", at: { line: "RUT:Line:12", near: [0.7, 0.22] }, side: "left" },
+  ] },
+  D: { v: "D", at: [10.62, 59.86, 9.6], notes: [
+    { text: "Valgte områder", at: "#chips > *" },
+    { text: "Takstsone 2V (Ruter)", at: { zone: "2V" }, size: 64, side: "left" },
+    { text: "Asker kommune er valgt – gul kant", at: [10.435, 59.836], size: 64, side: "below" },
+    { text: "Utenfor områdene dine blir kartet dimmet", at: [10.62, 59.80], size: 64 },
+  ] },
+  omrader: { v: "D", at: [10.62, 59.86, 9.6], picker: true, notes: [
+    { text: "Ruter-soner (Oslo og omegn)", at: "#pickerBody > div:nth-of-type(1)", side: "out" },
+    { text: "AtB-soner (Trondheim)", at: "#pickerBody > div:nth-of-type(2)", side: "out" },
+    { text: "Kommuner – kan kombineres med soner", at: "#pickerBody > div:nth-of-type(3)", side: "out" },
+  ] },
+  mobil: { v: "A", at: [10.4005, 63.4195, 15.3], stop: "NSR:StopPlace:42029", notes: [
+    { text: "Holdeplassen du trykket på", at: "stop", side: "below" },
+    { text: "Områdene dine", at: "#chips > *", side: "below" },
+    { text: "Varsle meg om stoppet", at: ".watch", side: "above" },
+    { text: "Sist sett i nærheten", at: ".last", side: "legend" },
+    { text: "Avganger i sanntid", at: "#deps", side: "legend" },
+  ] },
+};
+
+function pointOnLine(id, [fx, fy]) {
+  const want = [innerWidth * fx, innerHeight * fy];
+  let best, bestDistance = Infinity;
+  for (const part of state.lines.get(id) ?? []) for (const point of part) {
+    const p = map.project(point), distance = Math.hypot(p.x - want[0], p.y - want[1]);
+    if (distance < bestDistance) { bestDistance = distance; best = point; }
+  }
+  return best;
+}
+
+function noteRect(at, size) {
+  if (typeof at === "string" && at !== "stop") {
+    const boxes = [...document.querySelectorAll(at)].map((el) => el.getBoundingClientRect()).filter((b) => b.width);
+    if (!boxes.length) return null;
+    const left = Math.max(Math.min(...boxes.map((b) => b.left)), 4), top = Math.min(...boxes.map((b) => b.top));
+    const right = Math.min(Math.max(...boxes.map((b) => b.right)), innerWidth - 4), bottom = Math.min(Math.max(...boxes.map((b) => b.bottom)), innerHeight - 10);
+    const box = document.querySelector(at).closest(".sheet, dialog")?.getBoundingClientRect();
+    return { left: left - 5, top: top - 5, width: right - left + 10, height: bottom - top + 10, edge: box?.right };
+  }
+  const point = at === "stop" ? state.stop.at
+    : at.line ? pointOnLine(at.line, at.near)
+    : at.zone ? middle(state.zones.find((z) => z.name === at.zone).ring)
+    : at;
+  const p = map.project(point);
+  return { left: p.x - size / 2, top: p.y - size / 2, width: size, height: size, round: true };
+}
+
+// Magenta rings with numbered labels, so each part of a proposal is easy to point at.
+function markUp(notes) {
+  notes.forEach(({ text, at, side = "right", size = 40 }, i) => {
+    const r = noteRect(at, size);
+    if (!r) return;
+    const ring = document.createElement("div");
+    ring.className = `note-ring${r.round ? " round" : ""}`;
+    ring.innerHTML = `<b>${i + 1}</b>`;
+    Object.assign(ring.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    const label = document.createElement("div");
+    label.className = "note-label";
+    label.innerHTML = `<b>${i + 1}</b>${esc(text)}`;
+    document.body.append(ring, label);
+    const w = label.offsetWidth, h = label.offsetHeight, gap = 12, middleY = r.top + Math.min(r.height, 120) / 2 - h / 2;
+    const [x, y] = {
+      right: [r.left + r.width + gap, middleY],
+      out: [Math.max(r.left + r.width, r.edge ?? 0) + gap + 8, middleY],
+      left: [r.left - w - gap, middleY],
+      below: [r.left + r.width / 2 - w / 2, r.top + r.height + gap],
+      above: [r.left + r.width / 2 - w / 2, r.top - h - gap],
+      legend: [r.left + 20, r.top - h + 6], // over the section heading, like a fieldset legend
+    }[side];
+    const left = Math.min(Math.max(x, 8), innerWidth - w - 8), top = Math.min(Math.max(y, 8), innerHeight - h - 8);
+    Object.assign(label.style, { left: `${left}px`, top: `${top}px` });
+    if (side === "right" || side === "out") {
+      const line = document.createElement("div");
+      line.className = "note-line";
+      const from = Math.max(r.left + r.width, side === "out" ? r.edge ?? 0 : 0); // never across the sheet's content
+      Object.assign(line.style, { left: `${from}px`, top: `${top + h / 2 - 1.5}px`, width: `${Math.max(left - from, 0)}px` });
+      document.body.append(line);
+    }
+  });
+}
+
+async function runScene() {
+  document.body.classList.add("scene");
+  const settled = () => new Promise((resolve) => (map.loaded() ? resolve() : map.once("idle", resolve)));
+  await zonesReady;
+  await settled();
+  await loadView();
+  if (scene.line) { state.pickedLine = scene.line; draw(); renderSheet(); }
+  if (scene.stop) await openStop(scene.stop);
+  if (scene.picker) { renderPicker(); $("picker").show(); }
+  await new Promise((resolve) => setTimeout(resolve, 2000)); // An opened stop eases into view and reloads its lines.
+  await settled();
+  markUp(scene.notes);
+  document.title = "ready";
+}
+
+// ---------- Wiring ----------
+const params = new URLSearchParams(location.search);
+const scene = SCENES[params.get("scene")];
+const start = scene?.v ?? (VARIANTS[params.get("v")] ? params.get("v") : "A");
+const map = new maplibregl.Map({
+  container: "map", style: OFM + VARIANTS[start].style, center: scene?.at.slice(0, 2) ?? [10.7505, 59.9127], zoom: scene?.at[2] ?? 14.6,
+  attributionControl: { customAttribution: '<a href="https://openfreemap.org/">OpenFreeMap</a> · Linjer, stopp og avganger: <a href="https://developer.entur.org/">Entur</a> · Kommunegrenser: <a href="https://www.kartverket.no/">Kartverket</a>' },
+});
+// Keep the middle of the map clear of the sheet and the area chips.
+const wide = matchMedia("(min-width: 768px)").matches;
+map.setPadding(wide ? { left: 396, top: 110, right: 0, bottom: 0 } : { top: 110, bottom: innerHeight * 0.45, left: 0, right: 0 });
+$("sheet").innerHTML = `<div class="handle"></div><p class="hint">Henter stopp og linjer …</p>`;
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+map.on("style.load", addOverlays);
+map.once("style.load", loadView);
+setVariant(start, false);
+let viewTimer;
+map.on("moveend", () => { clearTimeout(viewTimer); viewTimer = setTimeout(loadView, 250); });
+map.on("click", (e) => {
+  const box = [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]];
+  const stop = map.queryRenderedFeatures(box, { layers: ["stops"] })[0];
+  if (stop) return openStop(stop.properties.id);
+  const line = map.queryRenderedFeatures(box, { layers: ["lines"] })[0];
+  state.pickedLine = line ? line.properties.id : null;
+  draw();
+  if (state.stop) closeStop(); else renderSheet();
+});
+for (const layer of ["stops", "lines"]) {
+  map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
+  map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
+}
+
+for (const s of SIGHTINGS) {
+  const el = document.createElement("div");
+  el.className = `sighting ${s.type} ${s.ago < 30 ? "fresh" : s.ago > 120 ? "old" : ""}`;
+  el.textContent = s.type === "u" ? "!" : s.type.toUpperCase();
+  el.title = `${TYPES[s.type]} · ${s.stop} · ${ago(s.at)}`;
+  new maplibregl.Marker({ element: el }).setLngLat([s.lon, s.lat]).addTo(map);
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  const d = t.dataset;
+  if (d.v) setVariant(d.v);
+  else if (d.fly) flyToArea(d.fly);
+  else if (d.bell) { state.bells.has(d.bell) ? state.bells.delete(d.bell) : state.bells.add(d.bell); renderChips(); }
+  else if (d.remove) { state.areas = state.areas.filter((id) => id !== d.remove); updateAreas(); }
+  else if (d.toggle) { state.areas = state.areas.includes(d.toggle) ? state.areas.filter((id) => id !== d.toggle) : [...state.areas, d.toggle]; renderPicker(); updateAreas(); if (state.areas.includes(d.toggle)) flyToArea(d.toggle); }
+  else if (t.id === "addArea") { renderPicker(); $("picker").showModal(); }
+  else if (d.line) { state.pickedLine = state.pickedLine === d.line ? null : d.line; draw(); state.stop ? null : renderSheet(); t.setAttribute("aria-pressed", state.pickedLine === d.line); }
+  else if (d.watch) { state.watchedStops.has(d.watch) ? state.watchedStops.delete(d.watch) : state.watchedStops.set(d.watch, state.stop.name); t.setAttribute("aria-pressed", state.watchedStops.has(d.watch)); renderChips(); }
+  else if (d.unwatch) { state.watchedStops.delete(d.unwatch); renderChips(); }
+  else if (d.stop) { const s = state.stops.find((x) => x.id === d.stop); if (s) openStop(d.stop); }
+  else if ("closestop" in d) closeStop();
+});
+
+const zonesReady = loadZones().then(() => {
+  updateAreas();
+  if (state.variant === "D" && map.getSource("zones")) fillZones();
+});
+if (scene) runScene();
+</script>
+</body>
+</html>
