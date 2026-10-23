@@ -3,20 +3,21 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+const source = await readFile(new URL("../web/basemap.js", import.meta.url), "utf8")
+  + "\n" + await readFile(new URL("../web/app.js", import.meta.url), "utf8");
 
 const reply = (payload, ok = true) => Promise.resolve({ ok, json: async () => payload });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // `route(url, options)` may return a response promise; anything else gets the default reply.
-async function setup(route = () => undefined) {
+async function setup(route = () => undefined, { vectorSupport = true, vectorFailure = false } = {}) {
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, {
       id: selector.slice(1),
       value: "",  // Like an empty input.
       classList: {
-        toggle() {},
+        toggle(name, value) { this[name] = value; },
         add() { this.hidden = true; },
         remove() { this.hidden = false; },
       },
@@ -30,6 +31,7 @@ async function setup(route = () => undefined) {
   const layer = (point, options) => ({
     point, options,
     addTo() { return this; },
+    getMaplibreMap() { return this; },
     bindPopup() { return this; },
     events: {},
     on(event, handler) { this.events[event] = handler; return this; },
@@ -47,17 +49,29 @@ async function setup(route = () => undefined) {
   let watches = 0;
   let intervals = 0;
   let poll;
-  const timeouts = new Set();
+  const rasterLayers = [];
+  const timeouts = new Map();
+  let elapsed = 0;
   const context = vm.createContext({
+    maplibregl: { setWorkerUrl() {} },
     L: {
       map: () => ({
-        on() {}, setView() {}, flyTo() {}, panTo() {},
+        on() {}, setView() {}, flyTo() {}, panTo() {}, invalidateSize() {},
+        hasLayer: (child) => !child.removed, removeLayer(child) { child.removed = true; },
         getCenter: () => ({ lat: 59.91, lng: 10.75 }), wrapLatLng: (point) => point,
       }),
-      tileLayer: layer, layerGroup: layer, marker: layer, circle: layer,
+      maplibreGL: (options) => {
+        if (vectorFailure) throw new Error("WebGL initialization failed");
+        return layer(null, options);
+      },
+      tileLayer: (url, options) => { rasterLayers.push(layer(url, options)); return rasterLayers.at(-1); },
+      layerGroup: layer, marker: layer, circle: layer,
       divIcon: (options) => options,
     },
-    document: { querySelector: element },
+    document: {
+      querySelector: element,
+      createElement: () => ({ getContext: () => vectorSupport ? { getExtension: () => null } : null }),
+    },
     navigator: { geolocation: {
       getCurrentPosition(callback, onError) { currentCallback = callback; currentError = onError; },
       watchPosition(callback, onError) { watchCallback = callback; watchError = onError; watches++; return 0; },
@@ -70,7 +84,7 @@ async function setup(route = () => undefined) {
     ]),
     AbortController,
     setInterval(callback) { intervals++; poll = callback; },
-    setTimeout(callback) { timeouts.add(callback); return callback; },
+    setTimeout(callback, delay) { timeouts.set(callback, elapsed + delay); return callback; },
     confirm: () => true,
     clearTimeout(callback) { timeouts.delete(callback); },
   });
@@ -83,15 +97,47 @@ async function setup(route = () => undefined) {
     element,
     click: () => element("#locateBtn").click(),
     current: (lat, lon, accuracy = 25) => currentCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
-    currentFails: () => currentError({ code: 3 }),
+    currentFails: (code = 3) => currentError({ code }),
     watch: (lat, lon, accuracy = 25) => watchCallback({ coords: { latitude: lat, longitude: lon, accuracy } }),
     watches: () => watches,
     watchDenied: () => watchError({ code: 1, PERMISSION_DENIED: 1 }),
     intervals: () => intervals,
     poll: () => poll(),
-    timeOut: () => timeouts.forEach((callback) => callback()),
+    rasterLayers,
+    timeOut: () => [...timeouts.keys()].forEach((callback) => { timeouts.delete(callback); callback(); }),
+    advanceTime: (milliseconds) => {
+      elapsed += milliseconds;
+      for (const [callback, deadline] of [...timeouts]) {
+        if (deadline <= elapsed) {
+          timeouts.delete(callback);
+          callback();
+        }
+      }
+    },
   };
 }
+
+test("profile XP progress uses server thresholds, resets at a new level, and hides after logout", async () => {
+  let user = { username: "alice" };
+  let stats = { xp: 65, level: 3, level_start_xp: 40, next_level_xp: 90 };
+  const app = await setup((url) => url === "/api/me" ? reply({ user, stats }) : undefined);
+  const progress = app.element("#xpProgress");
+  const wrapper = app.element("#xpProgressWrap");
+  assert.equal(wrapper.hidden, false);
+  assert.equal(progress.value, 25);
+  assert.equal(progress.max, 50);
+  assert.equal(app.element("#xpProgressText").textContent, "25 XP til level 4");
+  stats = { xp: 90, level: 4, level_start_xp: 90, next_level_xp: 160 };
+  await app.loadCurrentUser();
+  assert.equal(progress.value, 0);
+  assert.equal(progress.max, 70);
+  assert.equal(app.element("#userLevel").textContent, "Level 4");
+  assert.equal(app.element("#xpProgressText").textContent, "70 XP til level 5");
+  user = null;
+  stats = null;
+  await app.loadCurrentUser();
+  assert.equal(wrapper.hidden, true);
+});
 
 test("GPS preserves manual selection; button moves selection to current position", async () => {
   const app = await setup();
@@ -114,6 +160,78 @@ test("GPS preserves manual selection; button moves selection to current position
   app.watch(60.1, 10.1);
   assert.equal(app.state.selectedLatLng.lat, 60.1);  // A position from GPS keeps following GPS.
   assert.equal(app.watches(), 1);
+});
+
+test("a GPS fix clears an earlier location warning from both layouts", async () => {
+  const app = await setup();
+  app.currentFails(1);
+  assert.match(app.element("#formStatus").textContent, /Tillat lokasjon/);
+  app.watch(59.91, 10.75);
+  assert.equal(app.element("#formStatus").textContent, "");
+  assert.equal(app.element("#mobileFormStatus").textContent, "");
+});
+
+test("a timed-out initial GPS request does not warn when the watch already found a position", async () => {
+  const app = await setup();
+  app.watch(59.91, 10.75);
+  app.currentFails();
+  assert.ok(app.state.currentLocationMarker);
+  assert.ok(!app.element("#formStatus").textContent);
+  assert.ok(!app.element("#mobileFormStatus").textContent);
+});
+
+test("GPS recovery preserves a newer form error and timeouts do not claim permission was denied", async () => {
+  const app = await setup();
+  app.currentFails();
+  const status = app.element("#formStatus");
+  assert.match(status.textContent, /Fant ikke oppdatert posisjon/);
+  await app.element("#reportForm").submit({ preventDefault() {} });
+  assert.match(status.textContent, /Velg først en posisjon/);
+  const message = status.textContent;
+  app.watch(59.91, 10.75);
+  assert.equal(status.textContent, message);
+  assert.equal(app.element("#mobileFormStatus").textContent, message);
+});
+
+test("form messages disappear after three seconds in both layouts, but errors stay", async () => {
+  const app = await setup();
+  const submit = () => app.element("#reportForm").submit({ preventDefault() {} });
+  const status = app.element("#formStatus");
+  const mobileStatus = app.element("#mobileFormStatus");
+  await submit();
+  assert.match(status.textContent, /Velg først en posisjon/);
+  app.advanceTime(10000);
+  assert.match(status.textContent, /Velg først en posisjon/);  // An error says what to fix.
+  app.updateSelection(58, 8);
+  await submit();
+  assert.match(status.textContent, /publisert/);
+  assert.equal(mobileStatus.textContent, status.textContent);
+  app.advanceTime(2999);
+  assert.ok(status.textContent);
+  app.advanceTime(1);
+  assert.equal(status.textContent, "");
+  assert.equal(mobileStatus.textContent, "");
+});
+
+test("a new message restarts the three seconds, and hiding an old one keeps late errors", async () => {
+  let answerRoutes;
+  const app = await setup((url) => url.startsWith("/api/routes") ? new Promise((resolve) => { answerRoutes = resolve; }) : undefined);
+  const submit = () => app.element("#reportForm").submit({ preventDefault() {} });
+  const status = app.element("#formStatus");
+  app.updateSelection(58, 8);
+  await submit();
+  app.advanceTime(2000);
+  await submit();
+  app.advanceTime(2999);
+  assert.match(status.textContent, /publisert/);
+  const route = app.element("#routeInput");
+  route.value = "3";
+  route.input();  // Starts while the message is shown ...
+  app.advanceTime(1);
+  assert.equal(status.textContent, "");
+  answerRoutes(reply({ error: "Linjesøket feilet" }, false));  // ... and fails after it is gone.
+  await settle();
+  assert.match(status.textContent, /Linjesøket feilet/);
 });
 
 test("an automatic GPS position and its stop follow newer fixes until the user types a stop", async () => {
@@ -149,19 +267,65 @@ test("a poll waits for the previous one, so answers slower than the interval sti
   assert.equal(answers.length, 1);  // The next poll starts once the previous one is done.
 });
 
-test("failed map tiles show an error and a successful retry clears it", async () => {
+test("a vector map error stays visible until fresh content loads successfully", async () => {
   const app = await setup();
   const status = app.element("#mapStatus");
-  assert.equal(app.tiles.point, "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png");
-  app.tiles.events.loading();
-  app.tiles.events.tileerror();
-  app.tiles.events.load();
-  assert.match(status.textContent, /Kartbildene kunne ikke lastes/);
+  assert.equal(app.tiles.options.style, "/map-style.json");
+  app.tiles.events.data({ dataType: "source", tile: {} });  // The map has shown something ...
+  app.tiles.events.error();  // ... so a later error keeps it and says so.
+  app.tiles.events.idle();
+  assert.match(status.textContent, /Kartet kunne ikke lastes/);
   assert.equal(status.classList.hidden, false);
-  app.tiles.events.loading();
-  app.tiles.events.tileload();
-  app.tiles.events.load();
+  app.tiles.events.data({ dataType: "source", tile: {}, isSourceLoaded: true });  // As MapLibre sends a loaded tile.
+  app.tiles.events.idle();
+  assert.equal(status.textContent, "");
   assert.equal(status.classList.hidden, true);
+});
+
+test("an unreachable vector map before any tile switches to Kartverket's map", async () => {
+  const app = await setup();
+  app.tiles.events.error();
+  assert.equal(app.tiles.removed, true);
+  assert.match(app.rasterLayers.at(-1).point, /cache\.kartverket\.no/);
+  assert.doesNotMatch(app.element("#mapStatus").textContent, /Kartet kunne ikke lastes/);
+});
+
+test("Escape closes an open suggestion list without closing the menu", async () => {
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? reply({ items: [{ id: "A", name: "Alfa", lat: 59.9, lon: 10.7 }, { id: "B", name: "Alfabet", lat: 59.9, lon: 10.7 }] })
+    : undefined);
+  const stop = app.element("#stopInput");
+  stop.value = "Alf";
+  await stop.input();
+  let bubbled = 0;
+  const escape = () => stop.keydown({ key: "Escape", preventDefault() {}, stopPropagation() { bubbled--; } });
+  bubbled++; escape();
+  assert.equal(bubbled, 0);  // The open list took this Escape.
+  assert.equal(app.element("#stopOptions").hidden, true);
+  bubbled++; escape();
+  assert.equal(bubbled, 1);  // With the list closed, Escape reaches the menu.
+});
+
+test("a renderer startup failure falls back without stopping GPS or reporting", async () => {
+  const app = await setup(undefined, { vectorFailure: true });
+  assert.match(app.tiles.point, /cache\.kartverket\.no/);
+  app.current(59.91, 10.75);
+  assert.ok(app.state.currentLocationMarker);
+  app.updateSelection(58, 8);
+  assert.equal(app.state.selectedLatLng.lat, 58);
+});
+
+test("the standard Liberty map includes street labels, buildings and points of interest", async () => {
+  const style = JSON.parse(await readFile(new URL("../web/map-style.json", import.meta.url), "utf8"));
+  const labels = style.layers.filter((layer) => layer.type === "symbol");
+  assert.ok(labels.length > 0);
+  assert.equal(style.name, "Liberty");
+  for (const sourceLayer of ["place", "transportation_name", "poi"]) {
+    assert.ok(labels.some((layer) => layer["source-layer"] === sourceLayer));
+  }
+  assert.ok(style.layers.some((layer) => layer["source-layer"] === "building"));
+  assert.ok(style.layers.some((layer) => layer["source-layer"] === "water" && layer.type === "fill"));
+  assert.ok(style.layers.some((layer) => layer["source-layer"] === "park" && layer.type === "fill"));
 });
 
 test("GPS creates and updates the accuracy circle in metres", async () => {
@@ -248,7 +412,7 @@ test("stops sharing a name get distinct suggestions, and the keyboard picks one"
   assert.match(list.innerHTML, />Skolen \(850 m\)<.*>Skolen \(391,5 km\)</s);
   assert.match(list.innerHTML, />Jernbanetorget \(T-bane, 120 m\)<.*>Jernbanetorget \(buss, foran Oslo S, 180 m\)</s);
   assert.equal(list.hidden, false);
-  const key = (name) => stop.keydown({ key: name, preventDefault() {} });
+  const key = (name) => stop.keydown({ key: name, preventDefault() {}, stopPropagation() {} });
   key("ArrowUp");
   assert.match(list.innerHTML, /aria-selected="true">Jernbanetorget \(buss/);  // Up from the field wraps to the last.
   key("ArrowDown");
@@ -293,7 +457,7 @@ test("a published report stays reported as published when the refresh fails", as
   assert.equal(app.element("#feedStatus").textContent, "Serveren svarer ikke.");
 });
 
-test("typing a stop while the nearest stop loads keeps the text and still shows the nearest stop", async () => {
+test("typing a stop while the nearest stop loads keeps the text", async () => {
   const pending = [];
   const app = await setup((url) => url.startsWith("/api/stops/nearby")
     ? new Promise((resolve) => pending.push(resolve)) : undefined);
@@ -303,7 +467,6 @@ test("typing a stop while the nearest stop loads keeps the text and still shows 
   await stop.input();
   pending[0](reply({ items: [{ id: "A", name: "Alfa", distance_m: 40 }] }));
   await nearby;
-  assert.equal(app.element("#nearestStop").textContent, "Alfa (40 m)");
   assert.equal(stop.value, "Mitt sted");
   assert.equal(stop.dataset.stopId, "");
 });
@@ -443,7 +606,7 @@ test("old suggestions cannot be picked once the text changes, and closed lists s
     ? new Promise((resolve) => searches.push(resolve)) : undefined);
   const stop = app.element("#stopInput");
   const list = app.element("#stopOptions");
-  const key = (name) => stop.keydown({ key: name, preventDefault() {} });
+  const key = (name) => stop.keydown({ key: name, preventDefault() {}, stopPropagation() {} });
   stop.value = "Oslo S";
   const first = stop.input();
   searches[0](reply({ items: [{ id: "OSL", name: "Oslo S", lat: 59.91, lon: 10.75 }] }));
@@ -795,8 +958,11 @@ test("the line search sends the report position, so nearby lines come first", as
   assert.ok(urls.includes("/api/routes?q=3&lat=63.4168&lon=10.4076"));
 });
 
-test("failed map tiles show a message and a later successful load clears it", async () => {
-  const app = await setup();
+test("devices without WebGL keep a raster map, with error recovery and working GPS", async () => {
+  const app = await setup(undefined, { vectorSupport: false });
+  assert.match(app.tiles.point, /cache\.kartverket\.no/);
+  app.current(59.91, 10.75);
+  assert.ok(app.state.currentLocationMarker);
   const status = app.element("#mapStatus");
   app.tiles.events.loading();
   app.tiles.events.tileerror();
@@ -855,4 +1021,76 @@ test("line suggestions follow the report position until a line is picked", async
   assert.equal(route.value, "3 · AtB");
   app.updateSelection(59.91, 10.75);
   assert.equal(answers.length, 2);  // A picked line is not searched again.
+});
+
+test("the map centre button sets the report position, for keyboard users without GPS", async () => {
+  const app = await setup();
+  app.element("#centerBtn").click();
+  assert.deepEqual([app.state.selectedLatLng.lat, app.state.selectedLatLng.lon], [59.91, 10.75]);
+});
+
+test("a stop search that works again removes its earlier error, but not other messages", async () => {
+  let fail = true;
+  const app = await setup((url) => url.startsWith("/api/stops/search")
+    ? (fail ? reply({ error: "Holdeplassøket feilet." }, false) : reply({ items: [{ id: "A", name: "Alfa", lat: 59.9, lon: 10.7 }] }))
+    : undefined);
+  const stop = app.element("#stopInput");
+  const status = app.element("#formStatus");
+  stop.value = "Alfa";
+  await stop.input();
+  assert.match(status.textContent, /Holdeplassøket feilet/);
+  fail = false;
+  await stop.input();
+  assert.doesNotMatch(status.textContent, /feilet/);
+  assert.equal(stop.dataset.stopId, "A");
+  await app.element("#reportForm").submit({ preventDefault() {} });  // Another message ...
+  await stop.input();
+  assert.ok(status.textContent);  // ... stays when the search works.
+});
+
+test("an older lookup that works does not clear a newer error, and clearing keeps later errors", async () => {
+  let answerNearby;
+  let answerRoutes;
+  let stopFails = true;
+  const app = await setup((url) => {
+    if (url.startsWith("/api/stops/nearby")) return new Promise((resolve) => { answerNearby = resolve; });
+    if (url.startsWith("/api/routes")) return new Promise((resolve) => { answerRoutes = resolve; });
+    if (url.startsWith("/api/stops/search")) {
+      return stopFails ? reply({ error: "Holdeplassøket feilet." }, false) : reply({ items: [{ id: "S", name: "Sentrum", lat: 59.9, lon: 10.7 }] });
+    }
+  });
+  const status = app.element("#formStatus");
+  const stop = app.element("#stopInput");
+  app.loadNearbyStop(59.9, 10.7, false);  // A map pick's lookup, still waiting ...
+  stop.value = "Sentrum";
+  await stop.input();
+  answerNearby(reply({ items: [{ id: "N", name: "Nord", distance_m: 5 }] }));  // ... works after the search failed.
+  await settle();
+  assert.match(status.textContent, /Holdeplassøket feilet/);
+  const route = app.element("#routeInput");
+  route.value = "3";
+  route.input();  // A line search starts ...
+  stopFails = false;
+  await stop.input();  // ... the stop search works and clears its error ...
+  assert.equal(status.textContent, "");
+  answerRoutes(reply({ error: "Linjesøket feilet." }, false));  // ... and the line search then fails.
+  await settle();
+  assert.match(status.textContent, /Linjesøket feilet/);
+});
+
+test("GPS working again does not hide a stop search error that comes later", async () => {
+  let answerSearch;
+  const app = await setup((url) => url.startsWith("/api/stops/search") ? new Promise((resolve) => { answerSearch = resolve; }) : undefined);
+  const status = app.element("#formStatus");
+  app.click();
+  app.currentFails();  // The GPS error shows ...
+  assert.ok(status.textContent);
+  const stop = app.element("#stopInput");
+  stop.value = "Sentrum";
+  const search = stop.input();  // ... a search hangs ...
+  app.watch(59.9, 10.7);  // ... GPS works again and clears its error ...
+  await settle();
+  answerSearch(reply({ error: "Holdeplassøket feilet." }, false));  // ... and the search then fails.
+  await search;
+  assert.match(status.textContent, /Holdeplassøket feilet/);
 });

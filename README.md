@@ -1,13 +1,23 @@
 # BeeWare
 
-Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
+**BeeWare – få oversikt over det som skjer rundt deg.**
+
+BeeWare lar brukere markere ubehagelige, truende eller potensielt farlige hendelser på et kart
+for å advare andre i nærheten. Det kan være trakassering, truende oppførsel, slåssing eller
+åpenlys bruk og salg av narkotika.
+
+Ved å registrere sted og en kort beskrivelse kan brukerne dele det de har observert.
+Tidspunktet lagres automatisk når observasjonen publiseres. Målet er å gi andre bedre oversikt
+over omgivelsene, slik at de kan ta egne valg om hvor de ferdes.
 
 ## Hva appen gjør
 
 - Viser et kart med nylige observasjoner.
 - Lar brukeren trykke i kartet eller bruke egen posisjon for å registrere en observasjon.
+- Lar brukeren beskrive hendelsen kort og eventuelt knytte den til en holdeplass eller linje.
 - Viser egen posisjon som egen blå markør i kartet.
-- Dekker fastlands-Norge med Kartverkets topografiske kart og Enturs nasjonale holdeplass- og linjedata.
+- Viser standardkartet Liberty fra OpenFreeMap, med stedsnavn, gatenavn, bygninger og interessepunkter.
+- Bruker OpenStreetMap-data via OpenFreeMap, sammen med Enturs nasjonale holdeplass- og linjedata.
 - Henter nærmeste holdeplass innen 2 km, målt til nærmeste plattform.
 - Søker holdeplasser med eksakte navn først og deretter de nærmeste treffene.
 - Søker linjer med nummer, navn og operatør (for eksempel «31 Ruter»), med linjene som stopper nær
@@ -17,6 +27,7 @@ Et lite MVP-prosjekt for å melde fra om busskontrollører i nærheten.
   holdeplassøket treff, må ett av dem velges før publisering; uten treff lagres navnet slik det er
   skrevet, på rapportposisjonen.
 - Lar brukeren publisere anonymt, eller logge inn frivillig for å samle XP og level.
+- Viser fremgang mot neste level med en XP-bar i profilen.
 - Lar innloggede brukere bekrefte andres observasjoner med likes. Hver like gir eieren XP.
 - Lar eieren slette sin egen observasjon. Innloggede kan rapportere andres: en rapport skjuler
   observasjonen for den som rapporterer, og tre rapporter fra ulike kontoer skjuler den for alle.
@@ -61,8 +72,8 @@ kommer linjene som stopper innen 500 m fra rapportposisjonen (eller kartets midt
 valgt), så linjene innen 30 km og til slutt resten av landet. «3» ved Gløshaugen gir dermed AtBs
 linje 3, og ved Jernbanetorget Ruters T-banelinje 3.
 
-Kartverkets topografiske kart går til 71,5° N og dekker dermed ikke Svalbard eller Jan Mayen.
-Entur-dataene har heller ingen holdeplasser der.
+Bakgrunnskartet har global dekning. Holdeplass- og linjedataene dekker fastlands-Norge.
+Enheter uten WebGL 2 bruker Kartverkets vanlige fargekart som reservekart; dette dekker ikke Svalbard eller Jan Mayen.
 
 ## Lagring
 
@@ -76,8 +87,9 @@ den gir, lagres i samme transaksjon, og det samme gjelder en ny bruker og først
 
 - Hver IP kan sende 3 observasjoner per 10 minutter, 10 innloggingsforsøk per 5 minutter og 3 registreringer per time.
 - JSON-innhold kan være på maks 4 KB, og POST fra andre nettsteder avvises.
-- Alle svar med innhold har en Content-Security-Policy som bare slipper inn kartfliser fra Kartverket
-  i tillegg til appens egne filer, og siden kan ikke bygges inn i andre nettsteder.
+- Alle svar med innhold har en Content-Security-Policy som slipper inn kartdata og navneglyfer fra
+  OpenFreeMap og reservefliser fra Kartverket. Kartbibliotekene og kartets worker lastes lokalt.
+  Siden kan ikke bygges inn i andre nettsteder.
 - Nettleseren sjekker om appens filer er endret før den bruker en lagret kopi, så en oppdatering
   når alle med en gang.
 - Serveren lytter bare på `127.0.0.1`. Bak en HTTPS-proxy som sender `X-Forwarded-Proto: https`,
@@ -94,18 +106,18 @@ Dette må på plass før appen legges ut på nett:
   opptatt. Proxyen må ta imot hele forespørselen før den sendes videre. nginx gjør det som
   standard (`proxy_request_buffering on`); i Caddy må `request_buffers 4KiB` settes under
   `reverse_proxy`. HTTPS trengs også for GPS på mobil og for `Secure`-cookies.
-- **Avklar kartfliser ved stor trafikk.** Kartverkets åpne flistjeneste (`cache.kartverket.no`)
-  er gratis og oppført som åpne data under CC BY 4.0 i Geonorge, uten en publisert kvote. Den gis
-  uten garanti for oppetid, så avklar med Kartverket før appen får mye trafikk.
-  Ved bytte av flisleverandør må adressen også inn i `img-src` i `CONTENT_SECURITY_POLICY`
-  i `server.py`.
+- **Følg vilkårene for karttjenestene.** [OpenFreeMap](https://openfreemap.org/) er hovedtjenesten,
+  og Kartverkets åpne flistjeneste er reserve for enheter uten WebGL 2. Begge leveres uten garanti
+  for oppetid. Behold kildehenvisningene i kartet. Ved bytte av kartleverandør må domenene også
+  oppdateres i `CONTENT_SECURITY_POLICY` i `server.py`.
 
 ## Teknisk
 
 - Backend: standardbibliotek i Python (`http.server`, `sqlite3`) med JSON API
 - Frontend: HTML, CSS og JavaScript
-- Kart: Leaflet 1.9.4 (BSD-2-Clause, levert fra `web/vendor/`) med Kartverkets topografiske kart
-  (© Kartverket, CC BY 4.0)
+- Kart: Leaflet 1.9.4 med MapLibre GL JS 5.24.0 og MapLibre GL Leaflet 0.1.4, levert fra `web/vendor/`.
+  `web/map-style.json` inneholder standardstilen [Liberty](https://openfreemap.org/quick_start/) fra OpenFreeMap.
+  Kartdata: © OpenStreetMap / OpenMapTiles via OpenFreeMap; reservekart: © Kartverket (CC BY 4.0).
 - Holdeplasser og linjer: inneholder data under norsk lisens for offentlige data (NLOD)
   tilgjengeliggjort av Entur
 
@@ -114,8 +126,8 @@ Dette må på plass før appen legges ut på nett:
 Trykk «Bruk min posisjon» og gi nettleseren tilgang til posisjonen din.
 Den blå markøren viser hvor du er, og sirkelen viser anslått nøyaktighet.
 Rapportposisjonen og holdeplassen GPS fyller inn følger nye GPS-målinger, og knappen flytter
-rapportposisjonen tilbake til deg. Et klikk i kartet, flytting av rapportmarkøren, «Bruk kartets
-midtpunkt» eller et valgt holdeplassforslag lar deg velge et annet sted uten at GPS overskriver
+rapportposisjonen tilbake til deg. Et klikk i kartet, flytting av rapportmarkøren
+eller et valgt holdeplassforslag lar deg velge et annet sted uten at GPS overskriver
 valget, og GPS rører heller ikke en holdeplass du skriver inn selv. For en holdeplass GPS fylte
 inn, velger serveren nærmeste holdeplass til posisjonen som publiseres, så de alltid hører sammen. Med tastatur flyttes kartet med piltastene.
 

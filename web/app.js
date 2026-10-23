@@ -2,46 +2,15 @@
 const map = L.map("map", {
   zoomControl: true,
   doubleClickZoom: false,
+  minZoom: 2,
+  maxZoom: 18,
+  maxBounds: [[-85, -Infinity], [85, Infinity]],
+  maxBoundsViscosity: 1,
 });
 map.setView([59.9139, 10.7522], 12); // Oslo until GPS finds the user.
 
 const mapStatus = document.querySelector("#mapStatus");
-let loadedTiles = 0;
-let failedTiles = 0;
-
-const tiles = L.tileLayer(
-  "https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png",
-  {
-    maxZoom: 18,
-    attribution:
-      '&copy; <a href="https://www.kartverket.no/">Kartverket</a> · Holdeplasser og linjer: ' +
-      '<a href="https://developer.entur.org/stops-and-timetable-data">Entur</a> ' +
-      '(<a href="https://data.norge.no/nlod/no/2.0">NLOD</a>)',
-  }
-);
-
-tiles.on("loading", () => {
-  loadedTiles = 0;
-  failedTiles = 0;
-  mapStatus.textContent = "Laster kart …";
-  mapStatus.classList.remove("hidden");
-});
-
-tiles.on("tileload", () => { loadedTiles++; });
-tiles.on("tileerror", () => { failedTiles++; });
-
-tiles.on("load", () => {
-  if (failedTiles > 0 && loadedTiles === 0) {
-    mapStatus.textContent =
-      "Kartbildene kunne ikke lastes fra Kartverket. Sjekk internettilgang og eventuell innholdsblokkering.";
-    mapStatus.classList.remove("hidden");
-  } else {
-    mapStatus.textContent = "";
-    mapStatus.classList.add("hidden");
-  }
-});
-
-tiles.addTo(map);
+const tiles = createBasemap(map, mapStatus);
 
 const state = {
   selectedLatLng: null,
@@ -64,13 +33,10 @@ const routeInput = document.querySelector("#routeInput");
 const noteInput = document.querySelector("#noteInput");
 const formStatus = document.querySelector("#formStatus");
 const feedStatus = document.querySelector("#feedStatus");
-const selectedLocation = document.querySelector("#selectedLocation");
-const nearestStop = document.querySelector("#nearestStop");
 const feed = document.querySelector("#feed");
 const stopOptions = document.querySelector("#stopOptions");
 const routeOptions = document.querySelector("#routeOptions");
 const locateBtn = document.querySelector("#locateBtn");
-const centerBtn = document.querySelector("#centerBtn");
 const ttlLabel = document.querySelector("#ttlLabel");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
@@ -78,12 +44,68 @@ const logoutBtn = document.querySelector("#logoutBtn");
 const authForms = document.querySelector("#authForms");
 const userPanel = document.querySelector("#userPanel");
 const currentUsername = document.querySelector("#currentUsername");
-const authState = document.querySelector("#authState");
 const authStatus = document.querySelector("#authStatus");
 const authToggle = document.querySelector("#authToggle");
 const authContent = document.querySelector("#authContent");
+const menuToggle = document.querySelector("#menuToggle");
+const sidePanel = document.querySelector("#sidePanel");
+const menuBackdrop = document.querySelector("#menuBackdrop");
+const mobilePublish = document.querySelector("#mobilePublish");
+const mobileFormStatus = document.querySelector("#mobileFormStatus");
+const shell = document.querySelector(".shell");
+const wideLayout = typeof matchMedia === "function" ? matchMedia("(min-width: 1200px)") : null;
+let menuOpen = false;
+
+function setPanelOpen(panel, open) {
+  panel.classList.toggle("is-open", open);
+  panel.inert = !open;
+  panel.setAttribute("aria-hidden", String(!open));
+}
+
+function toggleMenu(open = !menuOpen) {
+  menuOpen = open;
+  shell.classList.toggle("menu-closed", !open);
+  menuToggle.hidden = open;
+  if (!open && (sidePanel.contains?.(document.activeElement) || document.activeElement === menuBackdrop)) {
+    menuToggle.focus({ preventScroll: true });
+  }
+  setPanelOpen(sidePanel, open);
+  setPanelOpen(menuBackdrop, open);
+  menuToggle.setAttribute("aria-expanded", String(open));
+  menuToggle.setAttribute("aria-label", open ? "Lukk meny" : "Åpne meny");
+  if (open) toggleAuth(false);
+}
+
+// On wide screens the sidebar starts open; narrower screens start with the map.
+toggleMenu(Boolean(wideLayout?.matches));
+wideLayout?.addEventListener("change", (event) => toggleMenu(event.matches));
+
+menuToggle.addEventListener("click", () => {
+  toggleMenu(true);
+  document.querySelector("#menuClose").focus({ preventScroll: true });
+});
+document.querySelector("#menuClose").addEventListener("click", () => {
+  toggleMenu(false);
+  menuToggle.focus({ preventScroll: true });
+});
+menuBackdrop.addEventListener("click", () => toggleMenu(false));
+// Keyboard dismissal also works when focus is inside either panel.
+[sidePanel, authContent].forEach((panel) => panel.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (panel === authContent && state.authOpen) {
+    toggleAuth(false);
+    authToggle.focus({ preventScroll: true });
+  } else if (menuOpen) {
+    toggleMenu(false);
+    menuToggle.focus({ preventScroll: true });
+  }
+}));
 const userLevel = document.querySelector("#userLevel");
 const userXp = document.querySelector("#userXp");
+const userConfirmations = document.querySelector("#userConfirmations");
+const xpProgressWrap = document.querySelector("#xpProgressWrap");
+const xpProgress = document.querySelector("#xpProgress");
+const xpProgressText = document.querySelector("#xpProgressText");
 
 // A suggestion list under a text field, used instead of <datalist>: browsers hide every datalist
 // option that does not contain the typed text, such as a stop found by its street or "31 Ruter".
@@ -115,6 +137,9 @@ function suggestionList(input, list, choose) {
   }
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      if (open && items.length) {
+        event.stopPropagation(); // Closes only the list; the next Escape closes the menu.
+      }
       open = false; // Also while a search is loading, so its answer does not open the list.
       render();
       return;
@@ -267,18 +292,43 @@ function escapeHtml(value) {
 }
 
 let statusVersion = 0;
+let statusSource = "";
+let statusTimer;
 
-function setStatus(message, type = "") {
-  statusVersion++;
+function showStatus(message, type = "") {
   formStatus.textContent = message;
   formStatus.className = type ? `status ${type}` : "status";
+  mobileFormStatus.textContent = message;
+  mobileFormStatus.className = formStatus.className;
+}
+
+function setStatus(message, type = "", source = "") {
+  clearTimeout(statusTimer);
+  statusVersion++;
+  statusSource = source;
+  showStatus(message, type);
+  // Other messages fade after 3 s; errors stay until replaced, since they say what to fix.
+  // Hiding leaves statusVersion alone, so a late error from an older action can still show.
+  if (message && type !== "error") {
+    statusTimer = setTimeout(() => showStatus(""), 3000);
+  }
 }
 
 // For answers that can arrive late, such as GPS or suggestions: the returned function shows a
 // message only if no newer one, such as a published report, was shown in the meantime.
-function lateStatus() {
+// A lookup that works again takes away the error it showed before, but no message shown since
+// it started. Like hiding, this leaves statusVersion alone, so late errors from others still show.
+function clearStatus(source, since) {
+  if (statusSource === source && statusVersion === since) {
+    clearTimeout(statusTimer);
+    statusSource = "";
+    showStatus("");
+  }
+}
+
+function lateStatus(source = "") {
   const before = statusVersion;
-  return (message, type) => statusVersion === before && setStatus(message, type);
+  return (message, type) => statusVersion === before && setStatus(message, type, source);
 }
 
 function setAuthStatus(message, type = "") {
@@ -289,7 +339,7 @@ function setAuthStatus(message, type = "") {
 function makeIcon(className) {
   return L.divIcon({
     className: "",
-    html: `<div class="${className}"></div>`,
+    html: `<div class="${className}">${className.startsWith("bee-dot") ? '<svg viewBox="0 0 40 40" aria-hidden="true"><use href="#bee-mark" /></svg>' : ""}</div>`,
     iconSize: [24, 24],
     iconAnchor: [12, 12],
   });
@@ -307,9 +357,12 @@ function markerAgeClass(isoString) {
 }
 
 function toggleAuth(open = !state.authOpen) {
+  if (open && menuOpen && !wideLayout?.matches) toggleMenu(false);
   state.authOpen = open;
-  authContent.classList.toggle("hidden", !open);
+  if (!open && authContent.contains?.(document.activeElement)) authToggle.focus({ preventScroll: true });
+  setPanelOpen(authContent, open);
   authToggle.setAttribute("aria-expanded", String(open));
+  authToggle.setAttribute("aria-label", open ? "Lukk profil" : "Åpne profil");
 }
 
 function setUser(user, stats = null) {
@@ -320,12 +373,25 @@ function setUser(user, stats = null) {
 
 function updateAuthUi() {
   const loggedIn = Boolean(state.user);
+  authContent.classList.toggle("is-logged-in", loggedIn);
   authForms.classList.toggle("hidden", loggedIn);
   userPanel.classList.toggle("hidden", !loggedIn);
-  authState.textContent = loggedIn ? "Frivillig profil aktiv" : "Valgfritt";
   currentUsername.textContent = loggedIn ? state.user.username : "";
-  userLevel.textContent = `Nivå ${state.stats?.level ?? 1}`;
-  userXp.textContent = `${state.stats?.xp ?? 0} XP · ${confirmations(state.stats?.likes_received ?? 0)}`;
+  userLevel.textContent = `Level ${state.stats?.level ?? 1}`;
+  userXp.textContent = `${state.stats?.xp ?? 0} XP`;
+  userConfirmations.textContent = confirmations(state.stats?.likes_received ?? 0);
+  const xp = state.stats?.xp ?? 0;
+  const start = state.stats?.level_start_xp;
+  const next = state.stats?.next_level_xp;
+  const hasProgress = loggedIn && Number.isFinite(start) && Number.isFinite(next) && next > start;
+  xpProgressWrap.hidden = !hasProgress;
+  if (hasProgress) {
+    const level = state.stats.level;
+    xpProgress.max = next - start;
+    xpProgress.value = Math.max(0, Math.min(xp - start, next - start));
+    xpProgressText.textContent = `${Math.max(0, next - xp)} XP til level ${level + 1}`;
+    xpProgress.setAttribute("aria-valuetext", `${xp - start} av ${next - start} XP til level ${level + 1}`);
+  }
 }
 
 // A position from GPS keeps following GPS; any other choice stays until the user changes it.
@@ -340,7 +406,6 @@ function updateSelection(lat, lon, fromGps = false) {
     routeSuggestions.show([]);
     searchRoute();
   }
-  selectedLocation.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
   if (!state.selectionMarker) {
     state.selectionMarker = L.marker([lat, lon], {
       draggable: true,
@@ -397,26 +462,27 @@ function renderFeed(items) {
   feed.innerHTML = items
     .map(
       (item) => `
-        <article class="feed-item" data-sighting-id="${escapeHtml(item.id)}">
-          <header>
-            <strong>${escapeHtml(item.stop_name || "Ukjent sted")}</strong>
-            <span class="tiny">${formatAge(item.created_at)}</span>
-          </header>
-          ${item.route ? `<div class="pill">Linje ${escapeHtml(item.route)}</div>` : ""}
-          ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
-          <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
-          <div class="feed-actions">
-            <span class="tiny">${item.distance_to_stop_m != null ? `${formatDistance(item.distance_to_stop_m)} fra nærmeste stopp` : "Ingen holdeplass innen 2 km"}</span>
-            <div class="feed-buttons">
-              <button class="ghost like-button" type="button" data-like-id="${escapeHtml(item.id)}">
-                ${item.liked_by_me ? "Bekreftet" : "Bekreft"} · ${item.likes_count}
-              </button>
-              ${item.mine
-                ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}">Slett</button>`
-                : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}">Rapporter</button>`}
+        <div class="feed-card">
+          <article class="feed-item" data-sighting-id="${escapeHtml(item.id)}">
+            <header>
+              <strong>${escapeHtml(item.stop_name || "Ukjent sted")}</strong>
+              <span class="tiny">${formatAge(item.created_at)}</span>
+            </header>
+            ${item.route ? `<div class="pill">Linje ${escapeHtml(item.route)}</div>` : ""}
+            ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
+            <p class="tiny">Meldt inn av ${escapeHtml(item.reporter || "Anonym")}</p>
+            <div class="feed-actions">
+              <div class="feed-buttons">
+                <button class="ghost like-button${item.liked_by_me ? " is-selected" : ""}" type="button" aria-pressed="${Boolean(item.liked_by_me)}" data-like-id="${escapeHtml(item.id)}">
+                  <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>${item.liked_by_me ? "Bekreftet" : "Bekreft"}<span class="action-count">${item.likes_count}</span>
+                </button>
+                ${item.mine
+                  ? `<button class="ghost like-button" type="button" data-delete-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-trash" /></svg>Slett</button>`
+                  : `<button class="ghost like-button" type="button" data-report-id="${escapeHtml(item.id)}"><svg class="icon" aria-hidden="true"><use href="#i-flag" /></svg>Rapporter</button>`}
+              </div>
             </div>
-          </div>
-        </article>
+          </article>
+        </div>
       `
     )
     .join("");
@@ -463,7 +529,7 @@ function renderSightings(items) {
 
 async function loadConfig() {
   const payload = await fetchJson("/api/config");
-  ttlLabel.textContent = `Observasjoner vises i ${payload.ttl_hours} timer.`;
+  ttlLabel.textContent = `Siste ${payload.ttl_hours} timer`;
 }
 
 async function loadCurrentUser() {
@@ -517,19 +583,18 @@ function clearStop() {
 }
 
 async function loadNearbyStop(lat, lon, replaceStop = true) {
+  const setNearbyStatus = lateStatus("stop");
+  const before = statusVersion;
   if (replaceStop) {
     clearStop(); // A newer position also outdates pending stop searches.
   }
-  nearestStop.textContent = "Laster...";
   try {
     const payload = await fetchLatest("nearby", `/api/stops/nearby?lat=${lat}&lon=${lon}`);
     if (!payload) {
       return;
     }
+    clearStatus("stop", before);
     const [closest] = payload.items;
-    nearestStop.textContent = closest
-      ? `${closest.name} (${formatDistance(closest.distance_m)})`
-      : "Fant ingen holdeplass innen 2 km.";
     // Fill in the stop unless the user has started typing one meanwhile.
     if (closest && !stopInput.value) {
       stopInput.value = closest.name;
@@ -537,7 +602,7 @@ async function loadNearbyStop(lat, lon, replaceStop = true) {
       stopInput.dataset.fromGps = String(state.selectionFollowsGps);
     }
   } catch (error) {
-    nearestStop.textContent = error.message;
+    setNearbyStatus(error.message, "error");
   }
 }
 
@@ -562,11 +627,10 @@ function stopChoices(stops) {
   }));
 }
 
-function selectStop({ stop, label }) {
+function selectStop({ stop }) {
   outdate("nearby"); // The position moves to this stop, so a pending nearby answer is outdated.
   updateSelection(stop.lat, stop.lon);
   map.panTo([stop.lat, stop.lon]);
-  nearestStop.textContent = `${label} (valgt)`;
   stopInput.dataset.stopId = stop.id;
   stopInput.dataset.fromGps = "false";
 }
@@ -604,6 +668,8 @@ function lookUpStopForGps(lat, lon, fromButton) {
 function handleLocationUpdate(position, shouldCenter = false, selectLocation = false) {
   const { latitude, longitude, accuracy } = position.coords;
   updateCurrentLocation(latitude, longitude, accuracy);
+  // A recovered fix clears only a GPS warning, preserving publishing and other form messages.
+  clearStatus("gps", statusVersion);  // Leaves statusVersion, so a pending search can still show its error.
   if (selectLocation || !state.selectedLatLng || state.selectionFollowsGps) {
     updateSelection(latitude, longitude, true);
     if (selectLocation) {
@@ -619,13 +685,13 @@ function handleLocationUpdate(position, shouldCenter = false, selectLocation = f
 
 function startLocationTracking(selectLocation = false) {
   if (!navigator.geolocation) {
-    setStatus("Geolokasjon er ikke tilgjengelig i denne nettleseren.", "error");
+    setStatus("Geolokasjon er ikke tilgjengelig i denne nettleseren.", "error", "gps");
     return;
   }
 
   locateBtn.disabled = true;
   const changesBefore = state.manualChanges;
-  const setGpsStatus = lateStatus();
+  const setGpsStatus = lateStatus("gps");
   let release = () => {};
   if (selectLocation) {
     gpsWait = new Promise((resolve) => (release = resolve));
@@ -634,14 +700,21 @@ function startLocationTracking(selectLocation = false) {
   navigator.geolocation.getCurrentPosition(
     (position) => {
       locateBtn.disabled = false;
-      setGpsStatus("Posisjon hentet fra lokasjonstjenester.", "ok");
       // A spot picked or a stop typed by hand while GPS was answering wins over the button press.
       handleLocationUpdate(position, true, selectLocation && state.manualChanges === changesBefore);
       release();
     },
-    () => {
+    (error) => {
       locateBtn.disabled = false;
-      setGpsStatus("Tillat lokasjon i nettleseren for å vise markøren din.", "error");
+      // The watch may already have succeeded while this separate request timed out.
+      if (selectLocation || !state.currentLocationMarker) {
+        setGpsStatus(
+          error.code === 1
+            ? "Tillat lokasjon i nettleseren for å vise markøren din."
+            : "Fant ikke oppdatert posisjon. Prøv igjen eller velg et sted i kartet.",
+          "error"
+        );
+      }
       if (selectLocation && state.manualChanges === changesBefore) {
         gpsButtonFailures++; // A report waiting for this position is not sent from the old one.
       }
@@ -675,6 +748,8 @@ let stopSearch = Promise.resolve();
 stopInput.addEventListener("input", () => (stopSearch = searchStop()));
 
 async function searchStop() {
+  const setStopStatus = lateStatus("stop");
+  const before = statusVersion;
   const query = stopInput.value.trim();
   userChoseManually();
   stopInput.dataset.stopId = "";
@@ -687,6 +762,7 @@ async function searchStop() {
     if (!payload) {
       return;
     }
+    clearStatus("stop", before);
     const choices = stopChoices(payload.items);
     stopSuggestions.show(choices);
     // A fully typed name, in any case, picks its stop when no other stop in the list shares it.
@@ -698,7 +774,7 @@ async function searchStop() {
     return choices.length && exact.length !== 1 ? "unpicked" : "ok";
   } catch (error) {
     stopSuggestions.show([]);
-    nearestStop.textContent = error.message;
+    setStopStatus(error.message, "error");
     return "failed"; // Publishing stops rather than send this name with a position it may not belong to.
   }
 }
@@ -710,7 +786,8 @@ routeInput.addEventListener("input", () => {
 });
 
 async function searchRoute() {
-  const setRouteStatus = lateStatus();
+  const setRouteStatus = lateStatus("route");
+  const before = statusVersion;
   try {
     // Lines stopping near the report come first, so "3" by Gløshaugen is AtB's line 3.
     const center = map.wrapLatLng(map.getCenter());
@@ -718,6 +795,7 @@ async function searchRoute() {
     const query = encodeURIComponent(routeInput.value.trim());
     const payload = await fetchLatest("route", `/api/routes?q=${query}&lat=${lat}&lon=${lon}`);
     if (payload) {
+      clearStatus("route", before);
       routeSuggestions.show(payload.items); // Each value keeps its operator: line 1 in Oslo is not line 1 in Trondheim.
     }
   } catch (error) {
@@ -762,7 +840,8 @@ feed.addEventListener("click", async (event) => {
 
 map.on("click", (event) => selectPoint(event.latlng));
 
-centerBtn.addEventListener("click", () => selectPoint(map.getCenter()));
+// Without GPS, keyboard users move the map with the arrow keys and pick its centre here.
+document.querySelector("#centerBtn").addEventListener("click", () => selectPoint(map.getCenter()));
 
 locateBtn.addEventListener("click", () => {
   startLocationTracking(true);
@@ -771,7 +850,7 @@ locateBtn.addEventListener("click", () => {
 reportForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitButton = reportForm.querySelector("button[type='submit']");
-  submitButton.disabled = true;
+  submitButton.disabled = mobilePublish.disabled = true;
   // Wait until no newer stop search or GPS button press has started meanwhile, then read the form in one go.
   const failuresBefore = gpsButtonFailures;
   let waits;
@@ -786,17 +865,17 @@ reportForm.addEventListener("submit", async (event) => {
       ? "Velg holdeplassen i forslagslisten, eller velg et sted i kartet."
       : "";
   if (searchProblem) {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
     setStatus(searchProblem, "error");
     return;
   }
   if (gpsButtonFailures !== failuresBefore) {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
     setStatus("Fant ikke posisjonen din. Velg et sted i kartet eller trykk «Bruk min posisjon» igjen.", "error");
     return;
   }
   if (!state.selectedLatLng) {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
     setStatus("Velg først en posisjon i kartet eller slå på lokasjonstjenester.", "error");
     return;
   }
@@ -819,7 +898,7 @@ reportForm.addEventListener("submit", async (event) => {
     setStatus(error.message, "error");
     return;
   } finally {
-    submitButton.disabled = false;
+    submitButton.disabled = mobilePublish.disabled = false;
   }
   if (noteInput.value.trim() === note) {
     noteInput.value = ""; // Keep a new note typed while this one was sent.
