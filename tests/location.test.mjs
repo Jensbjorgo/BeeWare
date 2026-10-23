@@ -315,12 +315,15 @@ test("a renderer startup failure falls back without stopping GPS or reporting", 
   assert.equal(app.state.selectedLatLng.lat, 58);
 });
 
-test("the simplified color map labels only places and omits buildings, shops and terrain detail", async () => {
+test("the standard Liberty map includes street labels, buildings and points of interest", async () => {
   const style = JSON.parse(await readFile(new URL("../web/map-style.json", import.meta.url), "utf8"));
   const labels = style.layers.filter((layer) => layer.type === "symbol");
   assert.ok(labels.length > 0);
-  assert.ok(labels.every((layer) => layer["source-layer"] === "place"));
-  assert.ok(style.layers.every((layer) => !["building", "poi", "transportation_name", "contour"].includes(layer["source-layer"])));
+  assert.equal(style.name, "Liberty");
+  for (const sourceLayer of ["place", "transportation_name", "poi"]) {
+    assert.ok(labels.some((layer) => layer["source-layer"] === sourceLayer));
+  }
+  assert.ok(style.layers.some((layer) => layer["source-layer"] === "building"));
   assert.ok(style.layers.some((layer) => layer["source-layer"] === "water" && layer.type === "fill"));
   assert.ok(style.layers.some((layer) => layer["source-layer"] === "park" && layer.type === "fill"));
 });

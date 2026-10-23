@@ -66,7 +66,7 @@ RATE_LIMITS = {"sighting": (3, 600), "login": (10, 300), "register": (3, 3600)}
 # Scripts, styles and the CSP-compatible map worker are all served locally.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self';"
-    " img-src 'self' data: blob: https://cache.kartverket.no;"
+    " img-src 'self' data: blob: https://cache.kartverket.no https://tiles.openfreemap.org;"
     " connect-src 'self' https://tiles.openfreemap.org; worker-src 'self';"
     " frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )

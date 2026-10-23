@@ -10,4 +10,5 @@
 MapLibre-filene kommer fra npm-pakken `maplibre-gl@5.24.0`; Leaflet-integrasjonen
 fra `@maplibre/maplibre-gl-leaflet@0.1.4`. Oppdater hovedfil og worker sammen.
 CSP-utgaven bruker en lokal worker og trenger ikke `blob:` i `worker-src`.
-Kartstilen i `../map-style.json` er tilpasset BeeWare og bruker OpenFreeMap-data.
+Kartstilen i `../map-style.json` er OpenFreeMaps standardstil Liberty.
+Kilde: https://tiles.openfreemap.org/styles/liberty

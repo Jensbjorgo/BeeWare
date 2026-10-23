@@ -16,7 +16,7 @@ over omgivelsene, slik at de kan ta egne valg om hvor de ferdes.
 - Lar brukeren trykke i kartet eller bruke egen posisjon for å registrere en observasjon.
 - Lar brukeren beskrive hendelsen kort og eventuelt knytte den til en holdeplass eller linje.
 - Viser egen posisjon som egen blå markør i kartet.
-- Viser et enkelt fargekart med stedsnavn, vann, grøntområder og veier. Bygninger, gatenavn og interessepunkter er skjult.
+- Viser standardkartet Liberty fra OpenFreeMap, med stedsnavn, gatenavn, bygninger og interessepunkter.
 - Bruker OpenStreetMap-data via OpenFreeMap, sammen med Enturs nasjonale holdeplass- og linjedata.
 - Henter nærmeste holdeplass innen 2 km, målt til nærmeste plattform.
 - Søker holdeplasser med eksakte navn først og deretter de nærmeste treffene.
@@ -116,7 +116,7 @@ Dette må på plass før appen legges ut på nett:
 - Backend: standardbibliotek i Python (`http.server`, `sqlite3`) med JSON API
 - Frontend: HTML, CSS og JavaScript
 - Kart: Leaflet 1.9.4 med MapLibre GL JS 5.24.0 og MapLibre GL Leaflet 0.1.4, levert fra `web/vendor/`.
-  `web/map-style.json` definerer fargene og kartlagene. Bare stedsnavn vises som tekst.
+  `web/map-style.json` inneholder standardstilen [Liberty](https://openfreemap.org/quick_start/) fra OpenFreeMap.
   Kartdata: © OpenStreetMap / OpenMapTiles via OpenFreeMap; reservekart: © Kartverket (CC BY 4.0).
 - Holdeplasser og linjer: inneholder data under norsk lisens for offentlige data (NLOD)
   tilgjengeliggjort av Entur
